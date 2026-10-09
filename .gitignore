@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*.xlsx
+*.xls
+*.csv
+.env
+.streamlit/secrets.toml
+secrets.toml
+config.toml
