@@ -2054,7 +2054,7 @@ def tampil_cleansing(st):
     if not pedoman:
         st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). Kota dan segmen tidak dapat divalidasi.")
     if not ss.get("kec_ada"):
-        st.info("Master wilayah belum tersedia di database, sehingga pencocokan kecamatan pada alamat dilewati.")
+        st.info("Master wilayah belum tersedia di database (menu 'Master Wilayah'), sehingga pencocokan kecamatan pada alamat dilewati.")
     t_full = tabel_cleansing(cl, kol, pedoman)
     n_cek = int((t_full["CATATAN_CEK"] != "").sum())
     st.caption("Periksa hasil cleansing. Kolom KOTA_BARU, PNAMLANG_AKHIR, dan SEGMENT_BARU dapat diedit; mengubah KOTA_BARU atau "
@@ -2100,15 +2100,26 @@ def tampil_cleansing(st):
         _rerun(st)
 
 
-def _notif_kolom(st, jenis, kb, km):
-    """Notifikasi kecocokan kolom yang dipilih pada data baru terhadap kolom pada data master."""
+def cocokkan_kolom(kolom_baru, jenis, kol_master):
+    """Cocokkan kolom data baru dengan kolom master untuk `jenis` (cust_id/alamat/distributor) secara otomatis.
+    Kembalikan (nama kolom di data baru atau None, pesan kesalahan atau '')."""
+    from difflib import get_close_matches
     norm = lambda v: re.sub(r"[^A-Z0-9]", "", str(v).upper())
-    if kb is None or km is None:
-        st.warning(f"Kolom {jenis} belum dipilih pada data baru atau data master.")
-    elif norm(kb) == norm(km):
-        st.success(f"Kolom {jenis} sesuai: '{kb}'.")
-    else:
-        st.warning(f"Kolom {jenis} berbeda: data baru '{kb}', data master '{km}'. Pastikan kedua kolom memuat data yang sama.")
+    dn = {norm(c): c for c in kolom_baru}
+    if kol_master is None:
+        ada = next((dn[k] for k in KANDIDAT_KOLOM[jenis] if k in dn), None)
+        return ada, f"Kolom {jenis} tidak ditemukan pada data master."
+    if norm(kol_master) in dn:
+        return dn[norm(kol_master)], ""
+    ada = next((dn[k] for k in KANDIDAT_KOLOM[jenis] if k in dn), None)
+    if ada is None:
+        mirip = get_close_matches(norm(kol_master), list(dn), n=1, cutoff=0.7)
+        ada = dn[mirip[0]] if mirip else None
+    if ada is None:
+        return None, (f"Kolom {jenis} tidak ditemukan pada data baru (data master: '{kol_master}'). "
+                      f"Pencocokan yang memerlukan kolom ini dilewati.")
+    return ada, (f"Kolom {jenis} berbeda: data baru '{ada}', data master '{kol_master}'. "
+                 f"Pastikan kedua kolom memuat data yang sama.")
 
 
 def page_update(st):
@@ -2139,44 +2150,19 @@ def page_update(st):
         sheet_baru = st.selectbox(
             "Pilih sheet data baru", daftar, index=daftar.index("Data_Baru") if "Data_Baru" in daftar else 0)
 
-        # ---- pencocokan cust_id ----
-        kol_b = ["(tidak ada)"] + list(sh_baru[sheet_baru].columns)
-        kol_m = ["(tidak ada)"] + master_columns()
-
-        def _pilih(wadah, label, opsi, jenis, df_ref):
-            d = deteksi_kolom(df_ref, jenis)
-            return wadah.selectbox(label, opsi, index=opsi.index(d) if d in opsi else 0, key=f"{label}_{jenis}")
-
-        def _o(v):
-            return None if v == "(tidak ada)" else v
-
-        with st.expander("Pencocokan cust_id & tail (keputusan per baris di tab 'Keputusan cust_id')", expanded=True):
-            aktif = st.checkbox("Aktifkan pencocokan cust_id", value=True)
-            ca, cb = st.columns(2)
-            ca.markdown("**Kolom di data baru**")
-            cb.markdown("**Kolom di master**")
-            ref_m = pd.DataFrame(columns=kol_m[1:])
-            cb_id = _pilih(ca, "cust_id (data baru)", kol_b, "cust_id", sh_baru[sheet_baru])
-            cm_id = _pilih(cb, "cust_id (master)", kol_m, "cust_id", ref_m)
-            cb_al = _pilih(ca, "alamat (data baru)", kol_b, "alamat", sh_baru[sheet_baru])
-            cm_al = _pilih(cb, "alamat (master)", kol_m, "alamat", ref_m)
-            cb_di = _pilih(ca, "distributor (data baru)", kol_b, "distributor", sh_baru[sheet_baru])
-            cm_di = _pilih(cb, "distributor (master)", kol_m, "distributor", ref_m)
-            _notif_kolom(st, "cust_id", _o(cb_id), _o(cm_id))
-            _notif_kolom(st, "alamat", _o(cb_al), _o(cm_al))
-            _notif_kolom(st, "distributor", _o(cb_di), _o(cm_di))
-            khusus = st.text_input("Distributor yang cust_id tail-nya (setelah tanda '-') ikut dicocokkan", "KFTD, AAM")
-            lingkup = st.checkbox("Cocokkan cust_id hanya di distributor yang sama", value=True,
-                                  help="Berlaku jika kolom distributor ada di data baru & master.")
-
-        cust_cfg = None
-        if aktif:
-            cust_cfg = {
-                "kol_baru": {"cust_id": _o(cb_id), "alamat": _o(cb_al), "distributor": _o(cb_di)},
-                "kol_master": {"cust_id": _o(cm_id), "alamat": _o(cm_al), "distributor": _o(cm_di)},
-                "ambang_nama": 0.80, "ambang_alamat": 0.70, "lingkup_distributor": lingkup, "min_tail": 3,
-                "distributor_khusus": [x.strip() for x in khusus.split(",") if x.strip()],
-            }
+        # ---- pencocokan kolom otomatis: hanya notifikasi bila nama kolom berbeda ----
+        kol_m = master_columns()
+        kb_map, km_map = {}, {}
+        for jenis in ("cust_id", "alamat", "distributor"):
+            km_map[jenis] = deteksi_kolom(pd.DataFrame(columns=kol_m), jenis)
+            kb_map[jenis], pesan = cocokkan_kolom(sh_baru[sheet_baru].columns, jenis, km_map[jenis])
+            if pesan:
+                st.error(pesan)
+        cust_cfg = {
+            "kol_baru": kb_map, "kol_master": km_map,
+            "ambang_nama": 0.80, "ambang_alamat": 0.70, "lingkup_distributor": True, "min_tail": 3,
+            "distributor_khusus": ["KFTD", "AAM"],
+        }
         if hash_sudah_disimpan(h):
             st.warning("File ini identik dengan file yang sudah pernah disimpan ke master.")
         if st.button("Jalankan Cleansing Data", type="primary"):
@@ -2693,6 +2679,55 @@ def panel_cust(st, res, rv, cmatch, b, t_row, opsi_label, opsi_kota, saved):
         terapkan_selisih_cust(st, rv, res, selisih)
 
 
+KOLOM_WILAYAH = ["provinsi", "kabupaten", "kecamatan", "kelurahan", "kode_kel"]
+
+
+def save_wilayah(df):
+    """Ganti seluruh tabel wilayah di Neon (satu transaksi, bertahap per 5000 baris)."""
+    with engine().begin() as c:
+        for i in range(0, len(df), 5000):
+            df.iloc[i:i + 5000].to_sql("wilayah", c, if_exists="replace" if i == 0 else "append",
+                                       index=False, method="multi", chunksize=1000)
+    _st.cache_data.clear()
+
+
+def page_wilayah(st):
+    st.subheader("Master Wilayah")
+    st.caption("Kolom yang dibutuhkan: provinsi, kabupaten, kecamatan (kelurahan dan kode_kel bersifat opsional). "
+               "Dipakai untuk menentukan kota dari kecamatan pada alamat saat cleansing.")
+    w = load_wilayah()
+    if w is None or w.empty:
+        st.warning("Belum ada master wilayah tersimpan.")
+    else:
+        kab = next((c for c in w.columns if str(c).lower() == "kabupaten"), None)
+        st.success(f"Master wilayah tersimpan: {len(w):,} baris" + (f", {w[kab].nunique():,} kab/kota." if kab else "."))
+    f = st.file_uploader("File master wilayah (.csv / .xlsx)", type=["csv", "xlsx"], key="wilayah_up")
+    if not f:
+        return
+    try:
+        if f.name.lower().endswith(".csv"):
+            d = pd.read_csv(f, dtype=str, sep=None, engine="python", encoding="utf-8-sig")
+        else:
+            d = pd.read_excel(f, dtype=str)
+    except Exception as e:
+        st.error(f"Gagal membaca file: {e}")
+        return
+    d.columns = [str(c).strip().lower() for c in d.columns]
+    kurang = [c for c in ("provinsi", "kabupaten", "kecamatan") if c not in d.columns]
+    if kurang:
+        st.error(f"Kolom tidak ditemukan: {', '.join(kurang)}. Kolom yang ada: {list(d.columns)}")
+        return
+    d = d[[c for c in KOLOM_WILAYAH if c in d.columns]].dropna(how="all")
+    st.write(f"Terbaca: {len(d):,} baris, {d['kabupaten'].nunique():,} kab/kota, {d['kecamatan'].nunique():,} kecamatan.")
+    st.dataframe(d.head(200), width="stretch")
+    ok = st.checkbox("Saya yakin menggantikan master wilayah yang ada", value=(w is None or w.empty))
+    if st.button("Simpan ke database", type="primary", disabled=not ok, key="simpan_wilayah"):
+        with st.spinner("Menyimpan ke Neon..."):
+            save_wilayah(d)
+            st.session_state.pop("db_cache", None)
+        st.success(f"Master wilayah tersimpan: {len(d):,} baris.")
+
+
 def page_pedoman(st):
     st.subheader("Pedoman ID_STR_OUTLET")
     st.caption("Format ID: KodeSegmen.KodeProvinsi.KodeKab/Kota.NomorUrut (urut alfabet; ID baru melanjutkan nomor tertinggi). "
@@ -2783,10 +2818,10 @@ def main():
         st.error(f"Tidak dapat terhubung ke database Neon: {e}")
         st.info("Periksa DATABASE_URL di Settings > Secrets (harus memuat ?sslmode=require).")
         st.stop()
-    menu = st.sidebar.radio("Menu", ["Update Data Baru", "Inisialisasi master", "Pedoman ID", "Riwayat & unduh"])
+    menu = st.sidebar.radio("Menu", ["Update Data Baru", "Inisialisasi master", "Pedoman ID", "Master Wilayah", "Riwayat & unduh"])
     st.sidebar.caption("Database: Neon PostgreSQL")
     {"Update Data Baru": page_update, "Inisialisasi master": page_inisialisasi, "Pedoman ID": page_pedoman,
-     "Riwayat & unduh": page_riwayat}[menu](st)
+     "Master Wilayah": page_wilayah, "Riwayat & unduh": page_riwayat}[menu](st)
 
 
 if __name__ == "__main__":
