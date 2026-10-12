@@ -2325,8 +2325,8 @@ def tampil_hasil_update(st):
     # Pilihan tab disimpan di session_state sehingga tetap di tab yang sedang dibuka.
     n_cm_tab = len(res.get("cust_match", []))
     n_cm_belum = len(res.get("cek_manual", []))
-    label_tab = {"review": f"Pemeriksaan dan Validasi Data Baru ({int((~ada_master).sum())})",
-                 "sama": f"Outlet yang Sudah Terdaftar di Master ({int(ada_master.sum())})",
+    label_tab = {"review": f"Pemeriksaan Data Baru ({int((~ada_master).sum())})",
+                 "sama": f"Outlet Terdaftar di Master ({int(ada_master.sum())})",
                  "cust": f"Penetapan ID Outlet ({n_cm_tab}, {n_cm_belum} belum diputuskan)",
                  "log": "Riwayat Perubahan Data",
                  "master": "Data Master Outlet (" + f"{len(res['master_lama']):,}".replace(",", ".") + " baris)"}
