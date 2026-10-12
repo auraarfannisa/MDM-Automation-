@@ -2630,15 +2630,16 @@ def ui_tab_cust(st, res, rv, opsi_kota):
     saved = bool(ss.get("saved"))
     cver = ss.setdefault("cust_ver", 0)
     n_belum = int(cmatch["AKSI"].isna().sum())
+    if saved:
+        st.warning("Hasil ini sudah disimpan ke master. Jalankan ulang cek & cleansing untuk mengubah keputusan.")
+    with st.expander("Petunjuk Pemeriksaan Data"):
+        st.markdown(PETUNJUK_CUST)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Cust_id sama persis", int((cmatch["JENIS_MATCH"] == "CUST_ID").sum()))
     c2.metric("Hanya tail sama", int((cmatch["JENIS_MATCH"] == "TAIL").sum()))
     c3.metric("Sudah diputuskan", len(cmatch) - n_belum)
     c4.metric("Belum diputuskan", n_belum)
-    if saved:
-        st.warning("Hasil ini sudah disimpan ke master. Jalankan ulang cek & cleansing untuk mengubah keputusan.")
-    with st.expander("Petunjuk Penggunaan"):
-        st.markdown(PETUNJUK_CUST)
+
     hanya = st.checkbox("Tampilkan hanya yang belum diputuskan", value=False, key="hanya_cust")
     pilih = ss.get("cust_pilih")
     if pilih not in set(cmatch["BARIS_EXCEL"]):
