@@ -2327,7 +2327,7 @@ def tampil_hasil_update(st):
     n_cm_belum = len(res.get("cek_manual", []))
     label_tab = {"review": f"Pemeriksaan Data Baru ({int((~ada_master).sum())})",
                  "sama": f"Outlet Terdaftar di Master ({int(ada_master.sum())})",
-                 "cust": f"Penetapan ID Outlet ({n_cm_tab}, {n_cm_belum} belum diputuskan)",
+                 "cust": f"Penetapan ID Outlet ({n_cm_tab})",
                  "log": "Riwayat Perubahan Data",
                  "master": "Data Master Outlet (500 baris)"}
     if st.session_state.get("tab_aktif") not in label_tab:
