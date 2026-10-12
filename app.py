@@ -582,6 +582,7 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
     # --- B. Calon ID baru + sorting ---
     # df_bersih = hasil cleansing tahap 1 (sudah diperiksa/diedit pengguna); tanpa itu, cleansing dijalankan di sini
     df_murni = df_bersih.copy() if df_bersih is not None else clean_dataframe_baru(df_murni, pedoman)
+    n_input = len(df_murni)
     # Kota yang dipilih user (dropdown pedoman di tab Keputusan cust_id): nama akhir dibangun ulang mengikuti kota
     for ix_, b_ in zip(df_murni.index, df_murni["BARIS_EXCEL"]):
         k_ = (kota_override or {}).get(b_)
@@ -774,6 +775,8 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
         "gabung": df_gabung,
         "max_seq": max_seq,
         "prefix_map": prefix_map,
+        "n_input": n_input,
+        "n_dup_lewat": n_dup_lewat,
         "stats": {
             "Data master": len(df_lama),
             "CUST_ID duplikat (tereliminasi)": n_cust_elim,
@@ -2230,7 +2233,7 @@ PETUNJUK_REVIEW = """**1. Periksa dan edit data**
 
 **3. Periksa data yang sudah ada di master**
 
-Data dengan nama outlet, kota, dan segmen yang sama dengan data master tersedia pada tab **Outlet yang Sudah Terdaftar di Master**. Periksa tab tersebut untuk memastikan apakah data merupakan outlet yang sudah terdaftar."""
+Data dengan nama outlet, kota, dan segmen yang sama dengan data master tersedia pada tab **Outlet Terdaftar di Master**. Periksa tab tersebut untuk memastikan apakah data merupakan outlet yang sudah terdaftar."""
 
 PETUNJUK_SAMA = """Data pada tab ini memiliki nama outlet, kota, dan segmen yang sama dengan data master, tetapi alamatnya berbeda.
 
@@ -2320,6 +2323,13 @@ def tampil_hasil_update(st):
         cols = st.columns(4)
         for col, (k, v) in zip(cols, items[i:i + 4]):
             col.metric(k, f"{v:,}")
+    cmt = res.get("cust_match", pd.DataFrame())
+    n_cust_blm = int((cmt["AKSI"] != "BARU").sum()) if len(cmt) else 0
+    st.caption(
+        f"Dari {res.get('n_input', 0):,} baris data baru: {int((~ada_master).sum()):,} masuk tab Pemeriksaan Data Baru, "
+        f"{int(ada_master.sum()):,} masuk tab Outlet Terdaftar di Master, {n_cust_blm:,} masuk tab Penetapan ID Outlet "
+        f"(cocok CUST_ID/CUST_ID TAIL dengan master), dan {res.get('n_dup_lewat', 0):,} dilewati karena sama persis dengan master "
+        f"(nama, kota, segmen, dan alamat). Baris tersebut tidak ikut dihitung di tab lain.")
     cm = res.get("cek_manual", pd.DataFrame())
     # Pengganti st.tabs: st.tabs kembali ke tab pertama setiap _rerun(st) (itu penyebab klik BUANG pindah ke Cek manual).
     # Pilihan tab disimpan di session_state sehingga tetap di tab yang sedang dibuka.
@@ -2329,12 +2339,12 @@ def tampil_hasil_update(st):
                  "sama": f"Outlet Terdaftar di Master ({int(ada_master.sum())})",
                  "cust": f"Penetapan ID Outlet ({n_cm_tab})",
                  "log": "Riwayat Perubahan Data",
-                 "master": "Data Master Outlet (500 baris)"}
+                 "master": "Data Master Outlet (" + f"{len(res['master_lama']):,}".replace(",", ".") + " baris)"}
     if st.session_state.get("tab_aktif") not in label_tab:
         st.session_state["tab_aktif"] = "review"
     blok = []
     if n_noid:
-        blok.append(f"{n_noid} baris belum punya ID (perbaiki kota/segmen di tab Pemeriksaan dan Validasi Data Baru atau putuskan HAPUS).")
+        blok.append(f"{n_noid} baris belum punya ID (perbaiki kota/segmen di tab Pemeriksaan Data Baru atau putuskan HAPUS).")
     if n_perlu - n_setuju:
         blok.append(f"{n_perlu - n_setuju} baris bertanda perlu dicek belum diputuskan (SETUJU / GABUNG / HAPUS).")
     if not st.session_state.get("saved"):
@@ -2537,6 +2547,10 @@ def tampil_hasil_update(st):
         m1.metric("Nama masih kotor", int(kotor_.sum()))
         m2.metric("Sudah diputuskan", int(putus.sum()))
         m3.metric("Belum diputuskan", int(belum_.sum()))
+        if int(belum_.sum()) == 0 and int(putus.sum()) == 0:
+            st.caption("Tidak ada baris pada tab ini yang memiliki catatan pemeriksaan, sehingga tidak ada keputusan yang perlu "
+                       "diambil. Baris bercatatan atau bernama kotor yang tidak terlihat di sini ada di tab lain "
+                       "(lihat ringkasan di atas tabel).")
         _tabel_review()
 
     if tab == "sama":
