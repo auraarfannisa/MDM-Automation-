@@ -908,8 +908,10 @@ def cek_nama_kotor(nama):
         m.append(f"tanda ',' {t.count(',')} kali")
     if "/" in t or "\\" in t:
         m.append("ada tanda '/'")
-    if re.search(r"[;:\"`@#*+=\[\]{}|<>?!~^_%$]", t):
+    if re.search(r"[;:`@#*+=\[\]{}|<>?!~^_%$]", t):
         m.append("ada simbol tidak lazim")
+    if t.count('"') % 2:
+        m.append("tanda petik tidak berpasangan")
     if t.count("(") != t.count(")") or t.count("(") > 1 or re.search(r"\(\s*\)", t):
         m.append("tanda kurung tidak wajar")
     if re.search(r"\s{2,}", t) or re.search(r"\.{2,}", t):
@@ -1449,6 +1451,7 @@ def save_pedoman(df_seg, df_wil):
     with engine().begin() as c:
         df_seg.to_sql("pedoman_segment", c, if_exists="replace", index=False)
         df_wil.to_sql("pedoman_wilayah", c, if_exists="replace", index=False)
+    _st.session_state.pop("db_cache", None)   # pedoman di cache sesi harus dibaca ulang, kalau tidak segmen/kota baru tidak terbaca
 
 
 def load_pedoman():
@@ -2056,17 +2059,24 @@ def tampil_cleansing(st):
     if not ss.get("kec_ada"):
         st.info("Master wilayah belum tersedia di database (menu 'Master Wilayah'), sehingga pencocokan kecamatan pada alamat dilewati.")
     t_full = tabel_cleansing(cl, kol, pedoman)
+    n_cc = ss.get("n_cust_cocok") or 0
+    if n_cc:
+        st.info(f"{n_cc} baris cocok dengan data master lewat CUST_ID/CUST_ID TAIL ({n_cc} belum diputuskan).")
+    n_kt = sum(1 for n_ in cl["PNAMLANG_AKHIR"] if cek_nama_kotor(n_))
+    if n_kt:
+        st.warning(f"{n_kt} baris PNAMLANG_AKHIR masih kotor.")
     n_cek = int((t_full["CATATAN_CEK"] != "").sum())
     st.caption("Periksa hasil cleansing. Kolom KOTA_BARU, PNAMLANG_AKHIR, dan SEGMENT_BARU dapat diedit; mengubah KOTA_BARU atau "
                "SEGMENT_BARU otomatis memperbarui PNAMLANG_AKHIR. Pencocokan dengan master dan keputusan dilakukan pada tahap 2.")
     st.write(f"Baris dengan catatan pemeriksaan: **{n_cek:,}** dari {len(t_full):,}")
-    hanya = st.checkbox("Tampilkan hanya baris yang perlu dicek", value=False, key="hanya_cl")
+    hanya = st.checkbox("Tampilkan hanya data yang memerlukan pemeriksaan", value=False, key="hanya_cl")
     t0 = t_full[t_full["CATATAN_CEK"] != ""] if hanya else t_full
     if len(t0) == 0:
         st.info("Tidak ada baris untuk ditampilkan.")
     else:
         t0 = t0.copy()
         t0["KOTA_BARU"] = t0["KOTA_BARU"].map(lambda v: v if _t(v) else None).astype(object)
+        t0.insert(0, "NO.", [int(i_) + 1 for i_ in t0.index])
         opsi_k = opsi_kota_ped(pedoman, t0["KOTA_BARU"].dropna())
         if opsi_k:
             col_kota = st.column_config.SelectboxColumn(
@@ -2075,7 +2085,8 @@ def tampil_cleansing(st):
         else:
             col_kota = st.column_config.TextColumn("KOTA_BARU (edit)")
         cfg = {
-            "CATATAN_CEK": st.column_config.TextColumn("CATATAN_CEK"),
+            "NO.": kolom_no(st),
+            "CATATAN_CEK": st.column_config.TextColumn("CATATAN PEMERIKSAAN"),
             "PNAMLANG_AKHIR": st.column_config.TextColumn("PNAMLANG_AKHIR (edit)"),
             "KOTA_BARU": col_kota,
             "SEGMENT_BARU": st.column_config.TextColumn("SEGMENT_BARU (edit)"),
@@ -2174,9 +2185,13 @@ def page_update(st):
                     kb = (cust_cfg or {}).get("kol_baru") or {}
                     cl = clean_dataframe_baru(murni, c["pedoman"], c["kec"], kb.get("alamat"))
                     kol_cl = {k: (kb.get(k) or deteksi_kolom(cl, k)) for k in ("alamat", "distributor", "cust_id")}
+                    try:   # jumlah baris yang cust_id / tail-nya sudah ada di master (diputuskan di tahap 2)
+                        n_cust = len(cocokkan_cust(cl, c["master"], cust_cfg, {}, cache=c["mdm"])["semua"]) if cust_cfg else 0
+                    except Exception:
+                        n_cust = 0
                     ss["run_args"] = dict(timpa=timpa, fallback=fallback, sheet_baru=sheet_baru, lewati=lewati,
                                           sheet_match=None, cust_cfg=cust_cfg)
-                    ss.update(cl=cl, cl_ver=0, kol_cl=kol_cl, kec_ada=bool(c["kec"]), tahap=1, res=None, rv=None,
+                    ss.update(cl=cl, cl_ver=0, kol_cl=kol_cl, n_cust_cocok=n_cust, kec_ada=bool(c["kec"]), tahap=1, res=None, rv=None,
                               pedoman=c["pedoman"], known=c["known"], fname=nama_file_master(),
                               base_ver=last[0] if last else 0, hash=h, nama_file=f_baru.name, saved=False,
                               batch_week=minggu_default(), sama_pilih=None, cust_pilih=None)
@@ -2203,6 +2218,53 @@ def _fragment(st, fn):
 
 
 WARNA_TAB = {"review": "blue", "sama": "orange", "cust": "green", "log": "violet", "master": "gray"}
+
+PETUNJUK_REVIEW = """**1. Periksa dan edit data**
+- Kolom **KOTA_BARU**, **SEGMENT_BARU**, dan **PNAMLANG_AKHIR** dapat diedit langsung pada tabel.
+- Perubahan pada **KOTA_BARU** atau **SEGMENT_BARU** akan otomatis menyesuaikan **PNAMLANG_AKHIR** dan ID outlet.
+
+**2. Tentukan keputusan untuk setiap baris**
+- **SETUJU:** pilih setelah data diperiksa dan dinyatakan benar, termasuk baris yang memiliki catatan pemeriksaan (**CATATAN PEMERIKSAAN**).
+- **HAPUS:** pilih jika data merupakan duplikat yang tidak perlu dibuatkan ID outlet baru.
+- Pastikan seluruh catatan pemeriksaan, termasuk nama outlet yang masih belum bersih, telah ditinjau sebelum menentukan keputusan.
+
+**3. Periksa data yang sudah ada di master**
+
+Data dengan nama outlet, kota, dan segmen yang sama dengan data master tersedia pada tab **Outlet yang Sudah Terdaftar di Master**. Periksa tab tersebut untuk memastikan apakah data merupakan outlet yang sudah terdaftar."""
+
+PETUNJUK_SAMA = """Data pada tab ini memiliki nama outlet, kota, dan segmen yang sama dengan data master, tetapi alamatnya berbeda.
+
+1. Centang **DETAIL** pada baris data untuk membandingkannya dengan data outlet yang sudah terdaftar di master.
+2. Tentukan keputusan berdasarkan hasil pemeriksaan:
+   * **ID BARU**: jika data tersebut merupakan outlet yang berbeda.
+   * **GABUNG KE MASTER**: jika data tersebut merupakan outlet yang sama. Data ditambahkan sebagai baris baru pada master dengan menggunakan ID outlet yang sudah ada.
+3. Pilih **Tampilkan hanya data yang belum diputuskan** untuk memfilter baris yang masih memerlukan keputusan."""
+
+PETUNJUK_CUST = """**Keterangan warna**
+- 🟦 **Data Baru**: data outlet yang sedang diproses.
+- 🟧 **Data Master**: data outlet yang sudah terdaftar.
+
+**Kolom yang dapat diedit**
+- **KEPUTUSAN**: tentukan tindakan untuk setiap data.
+- **PNAMLANG_BARU**: ubah nama outlet jika diperlukan.
+- **KOTA_BARU**: perbaiki kota outlet jika diperlukan.
+- **PNAMLANG_MASTER**: ubah nama outlet pada data master jika diperlukan.
+
+**Pilihan keputusan**
+- **ID BARU**: digunakan jika data merupakan outlet yang berbeda. Sistem akan membuat ID outlet baru.
+- **GABUNG ROW**: digunakan jika data merupakan outlet yang sama, tetapi perlu dicatat sebagai baris baru pada master. ID outlet yang sudah ada tetap digunakan.
+- **PERBARUI NAMA MASTER**: digunakan untuk memperbarui nama outlet pada master. Perubahan nama akan diterapkan pada seluruh baris yang memiliki ID outlet yang sama.
+
+**Ketentuan pemrosesan**
+- Kolom **ID_STR_OUTLET_BARU** terisi otomatis setelah keputusan dipilih, sesuai dengan jenis keputusan.
+- Nomor urut ID baru bersifat sementara hingga seluruh data selesai diputuskan.
+- Data dengan status (belum diputuskan) tidak akan diubah atau disimpan.
+- Setiap perubahan pada tabel akan langsung diterapkan pada panel perbandingan, begitu pula sebaliknya.
+- Centang **DETAIL** untuk menampilkan perbandingan data baru dengan data master di bawah tabel."""
+
+
+def kolom_no(st):
+    return st.column_config.NumberColumn("NO.", pinned=True, width="small", format="%d")
 
 
 def pilih_tab(st, label_tab):
@@ -2252,7 +2314,7 @@ def tampil_hasil_update(st):
     n_perlu, n_setuju = int(perlu.sum()), int((perlu & aktif["SETUJU"]).sum())
     n_noid = int((aktif["ID_STR_OUTLET"] == "").sum())
     stats = dict(res["stats"])
-    stats["Calon ID_BARU baru"] = len(aktif)
+    stats["Calon ID_STR baru"] = len(aktif)
     items = list(stats.items())
     for i in range(0, len(items), 4):
         cols = st.columns(4)
@@ -2263,19 +2325,21 @@ def tampil_hasil_update(st):
     # Pilihan tab disimpan di session_state sehingga tetap di tab yang sedang dibuka.
     n_cm_tab = len(res.get("cust_match", []))
     n_cm_belum = len(res.get("cek_manual", []))
-    label_tab = {"review": f"Review cleansing & ID baru ({int((~ada_master).sum())})",
-                 "sama": f"Sama dengan outlet master ({int(ada_master.sum())})",
-                 "cust": f"Keputusan cust_id ({n_cm_tab}, {n_cm_belum} belum)",
-                 "log": "Log perubahan", "master": f"Master lama ({len(res['master_lama']):,} baris)"}
+    label_tab = {"review": f"Pemeriksaan dan Validasi Data Baru ({int((~ada_master).sum())})",
+                 "sama": f"Outlet yang Sudah Terdaftar di Master ({int(ada_master.sum())})",
+                 "cust": f"Penetapan ID Outlet ({n_cm_tab}, {n_cm_belum} belum diputuskan)",
+                 "log": "Riwayat Perubahan Data",
+                 "master": "Data Master Outlet (" + f"{len(res['master_lama']):,}".replace(",", ".") + " baris)"}
     if st.session_state.get("tab_aktif") not in label_tab:
         st.session_state["tab_aktif"] = "review"
-    n_cm = len(res.get("cust_match", []))
-    if n_cm:
-        st.info(f"{n_cm} baris cocok dengan master lewat cust_id/tail ({len(cm)} belum diputuskan). "
-                "Putuskan satu per satu di tab 'Keputusan cust_id' di bawah.")
-    if n_kotor:
-        st.warning(f"{n_kotor} baris PNAMLANG_AKHIR masih kotor (tanda '-', ',' lebih dari sekali, '/', simbol lain, atau belum ada "
-                   "', SEGMENT'). Lihat kolom CATATAN_CEK, perbaiki di kolom PNAMLANG_AKHIR atau setujui bila sudah benar.")
+    blok = []
+    if n_noid:
+        blok.append(f"{n_noid} baris belum punya ID (perbaiki kota/segmen di tab Pemeriksaan dan Validasi Data Baru atau putuskan HAPUS).")
+    if n_perlu - n_setuju:
+        blok.append(f"{n_perlu - n_setuju} baris bertanda perlu dicek belum diputuskan (SETUJU / GABUNG / HAPUS).")
+    if not st.session_state.get("saved"):
+        for b_ in blok:
+            st.error(b_)
     tab = pilih_tab(st, label_tab)
 
     if tab == "log":
@@ -2300,8 +2364,8 @@ def tampil_hasil_update(st):
                  "KOTA_ASAL", "KOTA_BARU", "SEGMENT_BARU", "DISTRIBUTOR", "CUST_ID"]
         kolom = [c for c in kolom if c in d.columns]
         c1, c2 = st.columns(2)
-        hanya = c1.checkbox("Tampilkan hanya baris yang perlu dicek", value=False)
-        hanya_kotor = c2.checkbox("Tampilkan hanya nama yang masih kotor", value=False)
+        hanya = c1.checkbox("Tampilkan hanya data yang memerlukan pemeriksaan", value=False)
+        hanya_kotor = c2.checkbox("Tampilkan hanya nama outlet yang belum bersih", value=False)
         tampil = d[kolom]
         if hanya:
             tampil = tampil[(d["CATATAN_CEK"].astype(str).str.strip() != "") | d["BUANG"]]
@@ -2310,12 +2374,15 @@ def tampil_hasil_update(st):
         if len(tampil) == 0:
             st.info("Tidak ada baris untuk ditampilkan.")
             return
+        no_r = pd.Series(range(1, len(d) + 1), index=d.index)
+        tampil = tampil.copy()
+        tampil.insert(0, "NO.", no_r.loc[tampil.index].values)
         opsi_k = _opsi_kota(tampil["KOTA_BARU"].dropna())
         if opsi_k:
             col_kota = st.column_config.SelectboxColumn(
                 "KOTA_BARU (pilih dari pedoman)", options=opsi_k,
                 help="Pilihan berasal dari file pedoman, sehingga penulisan seragam (mis. KOTA BANDAR LAMPUNG). "
-                     "Nilai di luar pedoman ditampilkan di akhir daftar dan ditandai di CATATAN_CEK.")
+                     "Nilai di luar pedoman ditampilkan di akhir daftar dan ditandai di CATATAN PEMERIKSAAN.")
         else:
             col_kota = st.column_config.TextColumn("KOTA_BARU (edit)")
         cfg = {
@@ -2327,6 +2394,8 @@ def tampil_hasil_update(st):
             "PNAMLANG_AKHIR": st.column_config.TextColumn("PNAMLANG_AKHIR (edit)"),
             "SEGMENT_BARU": st.column_config.TextColumn("SEGMENT_BARU (edit)"),
             "ID_STR_OUTLET": st.column_config.TextColumn("ID_STR_OUTLET (pratinjau)"),
+            "NO.": kolom_no(st),
+            "CATATAN_CEK": st.column_config.TextColumn("CATATAN PEMERIKSAAN"),
         }
         ed = st.data_editor(
             tampil, key=f"rv_review_{st.session_state['rv_ver']}", hide_index=True, width="stretch",
@@ -2354,7 +2423,7 @@ def tampil_hasil_update(st):
         id_now = id_baru_tampil(pd.Series([lab_now], dtype=object), pd.Series([r["ID_STR_OUTLET"]], dtype=object)).iloc[0]
         st.markdown(f"**{_t(r['PNAMLANG_AKHIR'])}** dibandingkan dengan master **{id_m}**")
         if _t(r["CATATAN_CEK"]):
-            st.caption("CATATAN_CEK: " + _t(r["CATATAN_CEK"]))
+            st.caption("CATATAN PEMERIKSAAN: " + _t(r["CATATAN_CEK"]))
         c1, c2 = st.columns(2)
         with c1:
             st.markdown(f"{LABEL_BARU}Data baru")
@@ -2402,18 +2471,16 @@ def tampil_hasil_update(st):
         cari = rv.index[rv["BARIS_EXCEL"] == st.session_state.get("sama_pilih")]
         pilih = cari[0] if len(cari) else None
         sver = st.session_state.setdefault("sama_ver", 0)
-        hanya = st.checkbox("Tampilkan hanya yang belum diputuskan", value=False, key="hanya_sama")
+        hanya = st.checkbox("Tampilkan hanya data yang belum diputuskan", value=False, key="hanya_sama")
         t0 = tabel_sama_editor(rv, kol_ab, pilih)
+        no_s = pd.Series(range(1, len(t0) + 1), index=t0.index)
         if hanya:
             t0 = t0[(t0["KEPUTUSAN"] == KEP_BELUM) | t0["DETAIL"]]
         if len(t0) == 0:
             st.info("Semua baris sudah diputuskan.")
             return
         t0 = _kota_none(t0)
-        st.caption(f"{LABEL_BARU}= DATA_BARU, {LABEL_LAMA}= DATA_LAMA (master). Kolom KEPUTUSAN, PNAMLANG_BARU, dan KOTA_BARU bisa "
-                   "diedit langsung di tabel; ID_STR_OUTLET_BARU terisi otomatis setelah KEPUTUSAN dipilih (ID BARU atau GABUNG). "
-                   "Nomor urut ID bersifat sementara sampai semua baris diputuskan. Centang DETAIL untuk membuka perbandingan "
-                   "dengan data master di bawah tabel; edit di tabel dan di panel saling mengikuti.")
+        t0.insert(0, "NO.", no_s.loc[t0.index].values)
         opsi_k = _opsi_kota(t0["KOTA_BARU"].dropna())
         if opsi_k:
             col_kota = st.column_config.SelectboxColumn(LABEL_BARU + "KOTA_BARU (pilih)", options=opsi_k,
@@ -2422,8 +2489,9 @@ def tampil_hasil_update(st):
             col_kota = st.column_config.TextColumn(LABEL_BARU + "KOTA_BARU (edit)")
         cfg = {
             "DETAIL": st.column_config.CheckboxColumn("DETAIL", pinned=True, help="Centang satu baris untuk membuka perbandingan di bawah."),
+            "NO.": kolom_no(st),
             "KEPUTUSAN": st.column_config.SelectboxColumn("KEPUTUSAN", options=OPSI_SAMA, required=True, pinned=True),
-            "CATATAN_CEK": st.column_config.TextColumn("CATATAN_CEK"),
+            "CATATAN_CEK": st.column_config.TextColumn("CATATAN PEMERIKSAAN"),
             "ID_STR_OUTLET_BARU": st.column_config.TextColumn("ID_STR_OUTLET_BARU", help="Terisi setelah keputusan ID BARU / GABUNG."),
             "PNAMLANG_BARU": st.column_config.TextColumn(LABEL_BARU + "PNAMLANG_BARU (edit)"),
             "ALAMAT_BARU": st.column_config.TextColumn(LABEL_BARU + "ALAMAT_BARU"),
@@ -2459,16 +2527,26 @@ def tampil_hasil_update(st):
     if tab == "review":
         if not st.session_state.get("pedoman"):
             st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). ID hanya bisa dibuat dari prefix master.")
-        st.caption("KOTA_BARU, SEGMENT_BARU, dan PNAMLANG_AKHIR bisa diedit langsung; mengubah KOTA_BARU/SEGMENT_BARU otomatis "
-                   "mengubah PNAMLANG_AKHIR dan ID. Baris yang punya CATATAN_CEK (termasuk nama masih kotor) harus diputuskan "
-                   "dicentang SETUJU setelah dicek, atau dicentang HAPUS bila duplikat yang tidak jadi dibuat ID baru. "
-                   "Baris yang nama+kota+segmennya sama dengan outlet master ada di tab 'Sama dengan outlet master'.")
+        with st.expander("Petunjuk Pemeriksaan dan Pembersihan Data"):
+            st.markdown(PETUNJUK_REVIEW)
+        rr = rv[~ada_master]
+        putus = rr["SETUJU"].astype(bool) | rr["BUANG"].astype(bool)
+        kotor_ = (rr["NAMA_KOTOR"].astype(str).str.strip() != "") & ~putus
+        belum_ = (rr["CATATAN_CEK"].astype(str).str.strip() != "") & ~putus
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Nama masih kotor", int(kotor_.sum()))
+        m2.metric("Sudah diputuskan", int(putus.sum()))
+        m3.metric("Belum diputuskan", int(belum_.sum()))
         _tabel_review()
 
     if tab == "sama":
-        st.caption("Baris data baru yang nama+kota+segmennya sama dengan outlet di master tetapi alamatnya berbeda. Klik satu baris "
-                   "untuk membandingkannya dengan data master, lalu pilih KEPUTUSAN: ID BARU (outlet berbeda), atau GABUNG KE MASTER "
-                   "bila ternyata outlet yang sama (ditambahkan sebagai row baru ber-ID_STR_OUTLET master karena cust_id-nya baru).")
+        with st.expander("Petunjuk Pemeriksaan Data"):
+            st.markdown(PETUNJUK_SAMA)
+        lab_s = keputusan_sama_label(tabel_review(rv, True))
+        m1, m2, m3 = st.columns(3)
+        m1.metric("ID BARU (outlet berbeda)", int((lab_s == KEP_BARU).sum()))
+        m2.metric("Gabung ke master", int((lab_s == KEP_GABUNG).sum()))
+        m3.metric("Belum diputuskan", int((lab_s == KEP_BELUM).sum()))
         _tabel_sama()
 
     if tab == "cust":
@@ -2478,13 +2556,6 @@ def tampil_hasil_update(st):
         st.success("Sudah tersimpan ke master di database.")
     else:
         st.warning("Hasil ini belum disimpan ke master.")
-        blok = []
-        if n_noid:
-            blok.append(f"{n_noid} baris belum punya ID (perbaiki kota/segmen di tab Review atau putuskan HAPUS).")
-        if n_perlu - n_setuju:
-            blok.append(f"{n_perlu - n_setuju} baris bertanda perlu dicek belum diputuskan (SETUJU / GABUNG / HAPUS).")
-        for b in blok:
-            st.error(b)
         ok = st.checkbox("Saya sudah memeriksa hasil di atas dan siap menyimpan ke master")
         ok_pending = True
         if len(cm):
@@ -2512,10 +2583,10 @@ def tampil_hasil_update(st):
 
 
 BAGIAN_CUST = (
-    ("CUST_ID", "Cust_id sama persis dengan master",
+    ("CUST_ID", "CUST_ID Sama dengan Data Master",
      "Outlet yang sama dengan cust_id yang sama. Biasanya dihapus, atau nama master diperbarui bila nama berubah.",
      ["TIMPA", "ELIMINASI", "BARU"]),
-    ("TAIL", "Hanya tail cust_id yang sama (distributor khusus)",
+    ("TAIL", "Akhiran CUST_ID Sama (Distributor Tertentu)",
      "Ujung cust_id sama dengan outlet master tetapi cust_id lengkapnya berbeda. Biasanya digabung sebagai row baru di outlet tersebut.",
      ["GABUNG_LAMA", "TIMPA_GABUNG", "ELIMINASI", "BARU"]),
 )
@@ -2566,12 +2637,8 @@ def ui_tab_cust(st, res, rv, opsi_kota):
     c4.metric("Belum diputuskan", n_belum)
     if saved:
         st.warning("Hasil ini sudah disimpan ke master. Jalankan ulang cek & cleansing untuk mengubah keputusan.")
-    st.caption(f"{LABEL_BARU}= DATA_BARU, {LABEL_LAMA}= DATA_LAMA (master). Kolom KEPUTUSAN, PNAMLANG_BARU, KOTA_BARU, dan "
-               "PNAMLANG_MASTER bisa diedit langsung di tabel; ID_STR_OUTLET_BARU terisi otomatis bila KEPUTUSAN = ID BARU (nomor urut) "
-               "atau GABUNG ROW (ID outlet master). Baris yang dibiarkan '(belum diputuskan)' tidak diubah dan tidak ikut disimpan. "
-               "PERBARUI NAMA MASTER = PNAMLANG_AKHIR seluruh baris master ber-ID_STR sama diganti nama baru. GABUNG ROW = baris baru ditambahkan "
-               "ke outlet master. ID BARU = bukan outlet yang sama. Setiap perubahan diterapkan langsung; centang DETAIL untuk membuka "
-               "perbandingan dengan data master di bawah tabel (edit di tabel dan panel saling mengikuti).")
+    with st.expander("Petunjuk Penggunaan"):
+        st.markdown(PETUNJUK_CUST)
     hanya = st.checkbox("Tampilkan hanya yang belum diputuskan", value=False, key="hanya_cust")
     pilih = ss.get("cust_pilih")
     if pilih not in set(cmatch["BARIS_EXCEL"]):
@@ -2581,6 +2648,7 @@ def ui_tab_cust(st, res, rv, opsi_kota):
     for jenis, judul, ket, opsi in BAGIAN_CUST:
         opsi_label = [LABEL_CUST_BELUM] + [LABEL_AKSI[o] for o in opsi]
         t_full = tabel_cust_editor(cmatch, rv, jenis, opsi_label, pilih)
+        t_full.insert(0, "NO.", list(range(1, len(t_full) + 1)))
         for b in t_full.index:
             opsi_per_baris[b] = opsi_label
         t0 = t_full[(t_full["KEPUTUSAN"] == LABEL_CUST_BELUM) | t_full["DETAIL"]] if hanya else t_full
@@ -2599,8 +2667,9 @@ def ui_tab_cust(st, res, rv, opsi_kota):
             col_kota = st.column_config.TextColumn(LABEL_BARU + "KOTA_BARU (edit)")
         cfg = {
             "DETAIL": st.column_config.CheckboxColumn("DETAIL", pinned=True, help="Centang satu baris untuk membuka perbandingan di bawah."),
+            "NO.": kolom_no(st),
             "KEPUTUSAN": st.column_config.SelectboxColumn("KEPUTUSAN", options=opsi_label, required=True, pinned=True),
-            "CATATAN_CEK": st.column_config.TextColumn("CATATAN_CEK"),
+            "CATATAN_CEK": st.column_config.TextColumn("CATATAN PEMERIKSAAN"),
             "ID_STR_OUTLET_BARU": st.column_config.TextColumn("ID_STR_OUTLET_BARU", help="Terisi setelah keputusan ID BARU / GABUNG ROW."),
             "PNAMLANG_BARU": st.column_config.TextColumn(LABEL_BARU + "PNAMLANG_BARU (edit)"),
             "ALAMAT_BARU": st.column_config.TextColumn(LABEL_BARU + "ALAMAT_BARU"),
@@ -2644,7 +2713,7 @@ def panel_cust(st, res, rv, cmatch, b, t_row, opsi_label, opsi_kota, saved):
     id_m = r["ID_STR_OUTLET_MASTER"]
     st.markdown(f"**{_t(tr['PNAMLANG_BARU'])}** dibandingkan dengan master **{id_m}**")
     if _t(r["SARAN"]):
-        st.caption("CATATAN_CEK: " + _t(r["SARAN"]) + (f" | nama masih kotor: {r['NAMA_KOTOR']}" if _t(r["NAMA_KOTOR"]) else ""))
+        st.caption("CATATAN PEMERIKSAAN: " + _t(r["SARAN"]) + (f" | nama masih kotor: {r['NAMA_KOTOR']}" if _t(r["NAMA_KOTOR"]) else ""))
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f"{LABEL_BARU}Data baru")
@@ -2784,31 +2853,10 @@ def page_riwayat(st):
     st.caption("Backup & pemulihan data ditangani Neon (Dashboard > Restore / branch). Disarankan juga pg_dump berkala.")
 
 
-def gerbang_password(st):
-    """Opsional: jika APP_PASSWORD diisi di Secrets, user harus memasukkannya dulu."""
-    import hmac
-    try:
-        pw = st.secrets.get("APP_PASSWORD")
-    except Exception:
-        pw = None
-    if not pw or st.session_state.get("auth_ok"):
-        return
-    st.title("Master Data Management (MDM) Automation")
-    x = st.text_input("Password", type="password")
-    if x:
-        if hmac.compare_digest(x, str(pw)):
-            st.session_state["auth_ok"] = True
-            st.rerun()
-        else:
-            st.error("Password salah.")
-    st.stop()
-
-
 def main():
     import streamlit as st
 
     st.set_page_config(page_title="MDM Automation", layout="wide")
-    gerbang_password(st)
     st.title("Master Data Management (MDM) Automation")
     try:
         with engine().connect() as c:
