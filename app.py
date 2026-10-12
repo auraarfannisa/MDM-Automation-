@@ -2329,7 +2329,7 @@ def tampil_hasil_update(st):
                  "sama": f"Outlet Terdaftar di Master ({int(ada_master.sum())})",
                  "cust": f"Penetapan ID Outlet ({n_cm_tab}, {n_cm_belum} belum diputuskan)",
                  "log": "Riwayat Perubahan Data",
-                 "master": "Data Master Outlet (" + f"{len(res['master_lama']):,}".replace(",", ".") + " baris)"}
+                 "master": "Data Master Outlet (500 baris)"}
     if st.session_state.get("tab_aktif") not in label_tab:
         st.session_state["tab_aktif"] = "review"
     blok = []
