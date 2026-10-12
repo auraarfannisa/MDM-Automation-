@@ -27,6 +27,19 @@ KAMUS_17_DAERAH = {
     "MATARAM BARAT": "KOTA MATARAM", "MATARAMBARAT": "KOTA MATARAM",
     "SURABAYA BARAT": "KOTA SURABAYA", "SURABAYABARAT": "KOTA SURABAYA",
     "SOLO": "KOTA SURAKARTA", "PURWOKERTO": "KAB. BANYUMAS", "SERPONG": "KOTA TANGERANG SELATAN",
+    # ibukota kabupaten -> nama kabupaten resmi
+    "AMUNTAI": "KAB. HULU SUNGAI UTARA",
+    "LIMBOTO": "KAB. GORONTALO",
+    "LUBUKBASUNG": "KAB. AGAM",
+    "LUBUK BASUNG": "KAB. AGAM",
+    "POLEWALI": "KAB. POLEWALI MANDAR",
+    "PLEIHARI": "KAB. TANAH LAUT",
+    "PELAIHARI": "KAB. TANAH LAUT",
+    "RANGKASBITUNG": "KAB. LEBAK",
+    "TAHUNA": "KAB. KEPULAUAN SANGIHE",
+    "TAKENGON": "KAB. ACEH TENGAH",
+    "TANGGERONG": "KAB. KUTAI KARTANEGARA",
+    "TENGGARONG": "KAB. KUTAI KARTANEGARA",
 }
 
 
@@ -173,12 +186,73 @@ def norm_keputusan(series):
     return s.str.replace(r"\.0$", "", regex=True)  # Excel sering membaca 0 sebagai 0.0
 
 
-def clean_dataframe_baru(df, pedoman=None):
+def bangun_indeks_kecamatan(df_wil):
+    """Peta kecamatan (tanpa spasi/tanda baca) -> set nama kab/kota (sudah dinormalkan) dari master wilayah."""
+    if df_wil is None or not len(df_wil):
+        return None
+    peta = {str(c).strip().upper(): c for c in df_wil.columns}
+    ck, cb = peta.get("KECAMATAN"), peta.get("KABUPATEN")
+    if ck is None or cb is None:
+        return None
+    d = df_wil[[ck, cb]].dropna().drop_duplicates()
+    idx = defaultdict(set)
+    for kec, kab in zip(d[ck], d[cb]):
+        key = re.sub(r"[^A-Z0-9]", "", str(kec).upper())
+        if key:
+            idx[key].add(_norm_kab(kab))
+    return dict(idx) or None
+
+
+def kota_resmi(k, pedoman):
+    """True bila kota sudah berupa nama resmi di pedoman (mis. KOTA JAKARTA SELATAN); 'JAKARTA' saja bukan."""
+    return bool(pedoman) and _norm_kab(k) in pedoman["wil"]
+
+
+def cari_kota_dari_kecamatan(alamat, kota, kec_idx):
+    """Cari kecamatan di alamat (mis. '... LENTENG AGUNG - JAGAKARSA') lalu pilih kab/kota yang kecamatannya cocok
+    dan namanya memuat kota generik (mis. JAKARTA). Kembalikan (kab/kota atau None, catatan)."""
+    base = kunci_wilayah(kota)[1]
+    if not base or not kec_idx:
+        return None, ""
+    segs = [x.strip() for x in re.split(r"\s*[-,;/()]\s*", str(alamat).upper()) if x.strip()]
+    for seg in reversed(segs):
+        words = re.sub(r"[^A-Z0-9 ]", " ", seg).split()
+        hasil = set()
+        for n in range(min(len(words), 3), 0, -1):
+            for i in range(len(words) - n + 1):
+                for kab in kec_idx.get("".join(words[i:i + n]), ()):
+                    if base in kunci_wilayah(kab)[1]:
+                        hasil.add(kab)
+        if len(hasil) == 1:
+            return next(iter(hasil)), ""
+        if len(hasil) > 1:
+            return None, ("Kecamatan di alamat cocok dengan beberapa kota (" + ", ".join(sorted(hasil))
+                          + "); pilih KOTA_BARU secara manual")
+    return None, ""
+
+
+def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None):
     """Cleansing kota + nama + segmen pada data calon outlet baru (PNAMLANG_AKHIR = NAMA (KOTA), SUFFIX).
     Dengan `pedoman`, KOTA_BARU dinormalkan ke nama resmi pedoman (tambah KAB./KOTA, perbaiki spasi)."""
     df = df.copy()
     df["KOTA_ASAL"] = pick(df, "KOTA", "KOTA_CLEAN")          # kota sebelum cleansing
     df["KOTA_BARU"] = pick(df, "KOTA_CLEAN", "KOTA").apply(clean_viva_dan_daerah).apply(lambda v: kanonik_kota(v, pedoman))
+    # Kota masih generik (mis. JAKARTA): tentukan dari kecamatan di alamat memakai master wilayah
+    df["_CAT_KEC"] = ""
+    kol_a = kol_alamat if (kol_alamat and kol_alamat in df.columns) else deteksi_kolom(df, "alamat")
+    if kec_idx and pedoman and kol_a:
+        kota_n, cat_n = [], []
+        for k, a in zip(df["KOTA_BARU"], df[kol_a]):
+            cat = ""
+            if not pd.isna(k) and str(k).strip() and not pd.isna(a) and not kota_resmi(k, pedoman):
+                kab, cat = cari_kota_dari_kecamatan(a, k, kec_idx)
+                if kab:
+                    kn = kanonik_kota(kab, pedoman)
+                    cat, k = f"Kota ditentukan dari kecamatan di alamat ({k} -> {kn})", kn
+            kota_n.append(k)
+            cat_n.append(cat)
+        df["KOTA_BARU"] = pd.Series(kota_n, index=df.index, dtype=object)
+        df["_CAT_KEC"] = pd.Series(cat_n, index=df.index, dtype=object)
     df["PNAMLANG_ASAL"] = pick(df, "PNAMLANG", "PNAMLANG_CLEAN")  # nama sebelum cleansing
     nama = pick(df, "PNAMLANG_CLEAN", "PNAMLANG")
     seg = pick(df, "SEGMENT_CLEAN", "SEGMENT")
@@ -262,9 +336,9 @@ def _tanpa_kota(v):
 
 LABEL_AKSI = {
     "BARU": "ID BARU",
-    "ELIMINASI": "ELIMINASI (duplikat)",
-    "TIMPA": "TIMPA NAMA MASTER",
-    "TIMPA_GABUNG": "TIMPA NAMA + GABUNG ROW",
+    "ELIMINASI": "HAPUS (duplikat)",
+    "TIMPA": "PERBARUI NAMA MASTER",
+    "TIMPA_GABUNG": "PERBARUI NAMA MASTER + GABUNG ROW",
     "GABUNG_LAMA": "GABUNG ROW (NAMA LAMA)",
 }
 AKSI_DARI_LABEL = {v: k for k, v in LABEL_AKSI.items()}
@@ -370,7 +444,7 @@ def cocokkan_cust(df_new, df_lama, cfg, keputusan, cache=None):
                 lain.append(str(v))
         jenis_match = "CUST_ID" if via == "CUST_ID" else "TAIL"
         if ok_n and ok_a:
-            saran = "Mirip: kemungkinan outlet sama (" + ("eliminasi/timpa" if jenis_match == "CUST_ID" else "gabung row") + ")"
+            saran = "Mirip: kemungkinan outlet sama (" + ("hapus/perbarui" if jenis_match == "CUST_ID" else "gabung row") + ")"
         else:
             saran = sebab + ": periksa, bisa outlet berbeda"
         rec = {
@@ -455,7 +529,7 @@ def _kunci_nks(d):
 def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallback_prefix="1.10.31",
             sheet_baru="Data_Baru", sheet_match=None, lewati_duplikat=True,
             cust_cfg=None, keputusan_manual=None, pedoman=None, kota_override=None, nama_override=None, master_nama_override=None,
-            cache=None):
+            cache=None, df_bersih=None):
     log = []
 
     def L(jenis, id_, detail, row=None):
@@ -506,7 +580,8 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
     df_ditolak = pd.DataFrame()
 
     # --- B. Calon ID baru + sorting ---
-    df_murni = clean_dataframe_baru(df_murni, pedoman)
+    # df_bersih = hasil cleansing tahap 1 (sudah diperiksa/diedit pengguna); tanpa itu, cleansing dijalankan di sini
+    df_murni = df_bersih.copy() if df_bersih is not None else clean_dataframe_baru(df_murni, pedoman)
     # Kota yang dipilih user (dropdown pedoman di tab Keputusan cust_id): nama akhir dibangun ulang mengikuti kota
     for ix_, b_ in zip(df_murni.index, df_murni["BARIS_EXCEL"]):
         k_ = (kota_override or {}).get(b_)
@@ -560,7 +635,7 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
             L("EDIT NAMA MASTER", id_m_, f"{len(sama_)} baris ber-ID_STR sama: '{lama_}' -> '{n_}'", row=rb(b_))
 
         for r in hc["eliminasi"]:
-            L("CUST_ID SAMA (DIELIMINASI)", r["ID_STR_OUTLET_MASTER"],
+            L("CUST_ID SAMA (DIHAPUS)", r["ID_STR_OUTLET_MASTER"],
               f"[{r['MATCH_PADA']}] '{r['PNAMLANG_BARU']}' ~ '{r['PNAMLANG_MASTER']}' (nama {r['SKOR_NAMA']}, alamat {r['SKOR_ALAMAT']}) - {r['KEMIRIPAN']}", row=rb(r["BARIS_EXCEL"]))
         # TIMPA: PNAMLANG_AKHIR (dan KOTA_BARU agar nama konsisten) diganti di SEMUA baris master ber-ID_STR_OUTLET sama
         for r in hc["update"]:
@@ -573,7 +648,7 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
                 df_lama.loc[sama_id, "KOTA_BARU"] = r["_KOTA"]
             cat_kota = (f"; KOTA {lama_k} -> {r['_KOTA']} (periksa prefix ID)"
                         if pd.notna(r["_KOTA"]) and _s(lama_k) != _s(r["_KOTA"]) else "")
-            L("TIMPA PNAMLANG", id_m, f"[{r['MATCH_PADA']}] {len(sama_id)} baris ber-ID_STR sama: "
+            L("PERBARUI PNAMLANG", id_m, f"[{r['MATCH_PADA']}] {len(sama_id)} baris ber-ID_STR sama: "
               f"'{lama_n}' -> '{r['PNAMLANG_BARU']}'{cat_kota}", row=rb(r["BARIS_EXCEL"]))
         # GABUNG: baris baru ditambahkan ke master dengan ID_STR_OUTLET outlet yang cocok (bukan ID baru)
         df_gabung = pd.DataFrame()
@@ -700,12 +775,10 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
         "max_seq": max_seq,
         "prefix_map": prefix_map,
         "stats": {
-            "Master lama": len(df_lama),
-            "Cust_id sama (dieliminasi)": n_cust_elim,
-            "PNAMLANG ditimpa": n_timpa,
-            "Digabung (tambah row)": n_gabung,
-            "Cust_id belum diputuskan": len(cek_manual),
-            "Duplikat dilewati": n_dup_lewat,
+            "Data master": len(df_lama),
+            "CUST_ID duplikat (tereliminasi)": n_cust_elim,
+            "PNAMLANG diperbarui": n_timpa,
+            "Duplikat lintas distributor": n_gabung,
         },
     }
 
@@ -977,7 +1050,7 @@ def siapkan_rv(calon, res, pedoman, known_wil):
 
 SUMBER_REVIEW, SUMBER_SAMA, SUMBER_CUST, SUMBER_OTO = (
     "Review cleansing & ID baru", "Sama dengan outlet master", "Keputusan cust_id", "Cek otomatis")
-JENIS_SUMBER_ENGINE = {"CUST_ID SAMA (DIELIMINASI)": SUMBER_CUST, "TIMPA PNAMLANG": SUMBER_CUST, "GABUNG ROW": SUMBER_CUST,
+JENIS_SUMBER_ENGINE = {"CUST_ID SAMA (DIHAPUS)": SUMBER_CUST, "PERBARUI PNAMLANG": SUMBER_CUST, "GABUNG ROW": SUMBER_CUST,
                        "EDIT NAMA MASTER": SUMBER_CUST}
 
 
@@ -999,7 +1072,7 @@ def susun_log(res, rv):
         sm = SUMBER_SAMA if ada_m else (SUMBER_CUST if r.get("BARIS_EXCEL") in cust_baru else SUMBER_REVIEW)
         nama = r["PNAMLANG_AKHIR"]
         if r["BUANG"]:
-            L(sm, "DIBUANG (DUPLIKAT)", "", f"{nama} (baris {r.get('BARIS_EXCEL')}) tidak dijadikan ID baru", row=r)
+            L(sm, "DIHAPUS (DUPLIKAT)", "", f"{nama} (baris {r.get('BARIS_EXCEL')}) tidak dijadikan ID baru", row=r)
             continue
         if r["GABUNG"] and ada_m:
             L(sm, "GABUNG ROW (OUTLET SAMA)", r["ID_STR_OUTLET"],
@@ -1021,7 +1094,7 @@ def selesaikan(res, rv):
     """Susun master final dari master lama + calon (setelah edit & persetujuan)."""
     calon = rv[~rv["BUANG"]].copy()
     if (calon["ID_STR_OUTLET"].fillna("") == "").any():
-        raise ValueError("Masih ada baris tanpa ID_STR_OUTLET. Perbaiki kota/segmen atau centang BUANG.")
+        raise ValueError("Masih ada baris tanpa ID_STR_OUTLET. Perbaiki kota/segmen atau centang HAPUS.")
     log_df = susun_log(res, rv)
     log = log_df.to_dict("records")
     L = lambda j, i, d, row=None: log.append(
@@ -1068,8 +1141,8 @@ def selesaikan(res, rv):
             "perlu_cek": pd.DataFrame(perlu, columns=["MASALAH", "ID_STR_OUTLET", "DETAIL", "DISETUJUI"]), "stats": stats}
 
 
-OPSI_REVIEW = ["(belum)", "SETUJU", "BUANG"]
-OPSI_SAMA = ["(belum)", "ID BARU (outlet berbeda)", "GABUNG KE MASTER", "BUANG"]
+OPSI_REVIEW = ["(belum)", "SETUJU", "HAPUS"]
+OPSI_SAMA = ["(belum)", "ID BARU (outlet berbeda)", "GABUNG KE MASTER"]
 
 
 def tabel_review(rv, sama):
@@ -1122,7 +1195,7 @@ def master_serupa(df_lama, id_str, nama_baru, alamat_baru):
 # TABEL KEPUTUSAN (tab 'Sama dengan outlet master' & 'Keputusan cust_id'): susunan kolom
 #   KEPUTUSAN | CATATAN_CEK | ID_STR_OUTLET_BARU | DATA_BARU (PNAMLANG, ALAMAT, KOTA) | DATA_LAMA (PNAMLANG, ALAMAT, KOTA)
 # ------------------------------------------------------------------------------
-KEP_BARU, KEP_GABUNG, KEP_BUANG, KEP_BELUM = "ID BARU (outlet berbeda)", "GABUNG KE MASTER", "BUANG", "(belum)"
+KEP_BARU, KEP_GABUNG, KEP_BUANG, KEP_BELUM = "ID BARU (outlet berbeda)", "GABUNG KE MASTER", "HAPUS", "(belum)"
 LABEL_BARU, LABEL_LAMA = "🟦 ", "🟧 "   # penanda kelompok kolom: DATA_BARU / DATA_LAMA (master)
 
 
@@ -1132,8 +1205,8 @@ def _t(v):
 
 def keputusan_sama_label(d):
     """Label keputusan per baris tab 'Sama dengan outlet master' dari centang BUANG / GABUNG / SETUJU."""
-    return pd.Series(np.select([d["BUANG"].astype(bool), d["GABUNG"].astype(bool), d["SETUJU"].astype(bool)],
-                               [KEP_BUANG, KEP_GABUNG, KEP_BARU], default=KEP_BELUM), index=d.index, dtype=object)
+    return pd.Series(np.select([d["GABUNG"].astype(bool), d["SETUJU"].astype(bool)],
+                               [KEP_GABUNG, KEP_BARU], default=KEP_BELUM), index=d.index, dtype=object)
 
 
 def id_baru_tampil(kep, id_str):
@@ -1775,7 +1848,7 @@ def page_inisialisasi(st):
             simpan_master_awal(df, f_master.name, hashlib.sha256(data).hexdigest(), f"{len(df)} baris", dwil)
         for i in info:
             st.caption(i)
-        st.success(f"Master tersimpan: {len(df):,} baris. Lanjut ke menu 'Update mingguan'.")
+        st.success(f"Master tersimpan: {len(df):,} baris. Lanjut ke menu 'Update Data Baru'.")
 
 
 def master_columns():
@@ -1824,7 +1897,8 @@ def cache_db(st):
     c = st.session_state.get("db_cache")
     if not c or c["ver"] != ver:
         wil = load_wilayah()
-        c = {"ver": ver, "wil": wil, "pedoman": load_pedoman(), "known": _known_dari(wil), "master": load_master(), "mdm": {}}
+        c = {"ver": ver, "wil": wil, "pedoman": load_pedoman(), "known": _known_dari(wil), "kec": bangun_indeks_kecamatan(wil),
+             "master": load_master(), "mdm": {}}
         st.session_state["db_cache"] = c
     return c
 
@@ -1836,7 +1910,8 @@ def _jalankan(st, keputusan, pertahankan=False):
     res = run_mdm(c["master"], st.session_state["sh_baru"], wil, a["timpa"], a["fallback"],
                   a["sheet_baru"], a["sheet_match"], a["lewati"], a["cust_cfg"], keputusan, pedoman=pedoman,
                   kota_override=st.session_state.get("kota_override", {}), nama_override=st.session_state.get("nama_override", {}),
-                  master_nama_override=st.session_state.get("master_nama_override", {}), cache=c["mdm"])
+                  master_nama_override=st.session_state.get("master_nama_override", {}), cache=c["mdm"],
+                  df_bersih=a.get("df_bersih"))
     rv = siapkan_rv(res["calon"], res, pedoman, known)
     lama = st.session_state.get("rv")
     if pertahankan and lama is not None and len(rv):  # edit & centang yang sudah dibuat tidak hilang
@@ -1864,10 +1939,182 @@ def _jalankan(st, keputusan, pertahankan=False):
     st.session_state.pop("xlsx", None)
 
 
+def siapkan_murni(sheets_baru, sheet_baru):
+    """Sheet data baru + nomor baris Excel; validasi kolom nama & kota."""
+    if sheet_baru not in sheets_baru:
+        raise ValueError(f"Sheet data baru '{sheet_baru}' tidak ditemukan. Sheet tersedia: {list(sheets_baru)}")
+    d = sheets_baru[sheet_baru].copy()
+    d["BARIS_EXCEL"] = d.index + 2  # perkiraan nomor baris di Excel (baris 1 = header)
+    for kolom, kandidat in (("nama", ("PNAMLANG_CLEAN", "PNAMLANG")), ("kota", ("KOTA_CLEAN", "KOTA"))):
+        if not any(c in d.columns for c in kandidat):
+            raise ValueError(f"Sheet '{sheet_baru}' tidak memiliki kolom {kolom} ({' / '.join(kandidat)}). "
+                             f"Kolom yang ada: {list(d.columns)}")
+    return d
+
+
+def opsi_kota_ped(pedoman, tampil_kota, sekarang=""):
+    """Daftar pilihan KOTA_BARU dari pedoman, ditambah nilai di luar pedoman yang sedang dipakai."""
+    if not pedoman:
+        return None
+    opsi = sorted(pedoman["wil"].keys())
+    tambahan = sorted({str(v) for v in list(tampil_kota) + [sekarang] if _t(v) and str(v) not in opsi})
+    return opsi + tambahan
+
+
+def _tt(v):
+    s_ = _str_val(v)
+    return "" if s_ is None else s_
+
+
+def catatan_cleansing(cl, pedoman):
+    """CATATAN_CEK tahap 1: masalah pada kota, segmen, dan nama hasil cleansing."""
+    seg_map = pedoman["seg"] if pedoman else {}
+    wil_map = pedoman["wil"] if pedoman else {}
+    out = []
+    for k, sg, n, ck in zip(cl["KOTA_BARU"], cl["SEGMENT_BARU"], cl["PNAMLANG_AKHIR"], cl["_CAT_KEC"]):
+        notes, kk, ss_ = [], _norm_kab(k), _s(sg)
+        if pedoman:
+            if not ss_:
+                notes.append("Segmen kosong")
+            elif ss_ not in seg_map:
+                notes.append(f"Segmen '{ss_}' tidak ada di pedoman")
+            if not kk:
+                notes.append("Kota kosong")
+            elif kk not in wil_map:
+                kand = pedoman.get("by_base", {}).get(kunci_wilayah(kk)[1], [])
+                if len(kand) > 1:
+                    notes.append(f"Kota '{kk}' ada sebagai {' dan '.join(kand)} di pedoman; pilih salah satu di KOTA_BARU")
+                else:
+                    notes.append(f"Kota '{kk}' belum berupa nama resmi di pedoman; pilih di KOTA_BARU")
+        if not _s(n):
+            notes.append("Nama kosong")
+        if ss_ == "RS.TNI-POL" and not re.search(r",\s*(RSAD|RSAL|RSAU|RSPOL)\s*$", _s(n)):
+            notes.append("Segmen RS.TNI-POL: suffix (RSAD/RSAL/RSAU/RSPOL) tidak bisa dipastikan; isi manual di PNAMLANG_AKHIR")
+        kotor = cek_nama_kotor(n)
+        if kotor:
+            notes.append("Nama masih kotor: " + "; ".join(kotor))
+        if _t(ck):
+            notes.append(ck)
+        out.append("; ".join(notes))
+    return pd.Series(out, index=cl.index, dtype=object)
+
+
+def tabel_cleansing(cl, kol, pedoman):
+    """Tabel tampilan tahap 1 (indeks = indeks cl)."""
+    def kolom(k):
+        c = kol.get(k)
+        return cl[c] if c and c in cl.columns else pd.Series("", index=cl.index)
+    t = pd.DataFrame({
+        "CATATAN_CEK": catatan_cleansing(cl, pedoman),
+        "PNAMLANG_ASAL": cl["PNAMLANG_ASAL"],
+        "PNAMLANG_AKHIR": cl["PNAMLANG_AKHIR"],
+        "ALAMAT": kolom("alamat"),
+        "KOTA_ASAL": cl["KOTA_ASAL"],
+        "KOTA_BARU": cl["KOTA_BARU"],
+        "SEGMENT_BARU": cl["SEGMENT_BARU"],
+        "DISTRIBUTOR": kolom("distributor"),
+        "CUST_ID": kolom("cust_id"),
+    }, index=cl.index)
+    for c in t.columns:
+        t[c] = t[c].map(_tt).astype(object)
+    return t
+
+
+def terapkan_edit_cleansing(cl, ed):
+    """Terapkan edit KOTA_BARU / SEGMENT_BARU / PNAMLANG_AKHIR; nama akhir ikut kota & segmen bila nama tidak diedit langsung."""
+    d = cl.copy()
+    for c in ("KOTA_BARU", "SEGMENT_BARU", "PNAMLANG_AKHIR", "_CAT_KEC"):
+        d[c] = d[c].astype(object)
+    for i in ed.index:
+        k_old, s_old, n_old = _s(d.at[i, "KOTA_BARU"]), _s(d.at[i, "SEGMENT_BARU"]), _t(d.at[i, "PNAMLANG_AKHIR"])
+        k_new, s_new, n_new = _s(ed.at[i, "KOTA_BARU"]), _s(ed.at[i, "SEGMENT_BARU"]), _t(ed.at[i, "PNAMLANG_AKHIR"])
+        if (k_new, s_new, n_new) == (k_old, s_old, n_old):
+            continue
+        if k_new != k_old:
+            d.at[i, "_CAT_KEC"] = ""
+        d.at[i, "KOTA_BARU"] = k_new or None
+        d.at[i, "SEGMENT_BARU"] = s_new or None
+        if n_new != n_old:
+            d.at[i, "PNAMLANG_AKHIR"] = n_new
+        else:
+            d.at[i, "PNAMLANG_AKHIR"] = bangun_nama(d.at[i, "_NAMA_DASAR"], k_new or None, s_new or None, d.at[i, "_SUFIKS"])
+    return d
+
+
+def tampil_cleansing(st):
+    """Tahap 1: hasil cleansing kota + PNAMLANG untuk diperiksa/diedit sebelum dicocokkan dengan master."""
+    ss = st.session_state
+    cl = ss.get("cl")
+    if cl is None:
+        return
+    pedoman, kol = ss.get("pedoman"), ss.get("kol_cl", {})
+    st.divider()
+    st.subheader("Tahap 1: Hasil Cleansing")
+    st.write(f"File: **{ss['nama_file']}** ({len(cl):,} baris)")
+    if not pedoman:
+        st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). Kota dan segmen tidak dapat divalidasi.")
+    if not ss.get("kec_ada"):
+        st.info("Master wilayah belum tersedia di database, sehingga pencocokan kecamatan pada alamat dilewati.")
+    t_full = tabel_cleansing(cl, kol, pedoman)
+    n_cek = int((t_full["CATATAN_CEK"] != "").sum())
+    st.caption("Periksa hasil cleansing. Kolom KOTA_BARU, PNAMLANG_AKHIR, dan SEGMENT_BARU dapat diedit; mengubah KOTA_BARU atau "
+               "SEGMENT_BARU otomatis memperbarui PNAMLANG_AKHIR. Pencocokan dengan master dan keputusan dilakukan pada tahap 2.")
+    st.write(f"Baris dengan catatan pemeriksaan: **{n_cek:,}** dari {len(t_full):,}")
+    hanya = st.checkbox("Tampilkan hanya baris yang perlu dicek", value=False, key="hanya_cl")
+    t0 = t_full[t_full["CATATAN_CEK"] != ""] if hanya else t_full
+    if len(t0) == 0:
+        st.info("Tidak ada baris untuk ditampilkan.")
+    else:
+        t0 = t0.copy()
+        t0["KOTA_BARU"] = t0["KOTA_BARU"].map(lambda v: v if _t(v) else None).astype(object)
+        opsi_k = opsi_kota_ped(pedoman, t0["KOTA_BARU"].dropna())
+        if opsi_k:
+            col_kota = st.column_config.SelectboxColumn(
+                "KOTA_BARU (pilih)", options=opsi_k,
+                help="Pilihan berasal dari file pedoman. Nilai di luar pedoman ditampilkan di akhir daftar.")
+        else:
+            col_kota = st.column_config.TextColumn("KOTA_BARU (edit)")
+        cfg = {
+            "CATATAN_CEK": st.column_config.TextColumn("CATATAN_CEK"),
+            "PNAMLANG_AKHIR": st.column_config.TextColumn("PNAMLANG_AKHIR (edit)"),
+            "KOTA_BARU": col_kota,
+            "SEGMENT_BARU": st.column_config.TextColumn("SEGMENT_BARU (edit)"),
+        }
+        edit = ["KOTA_BARU", "PNAMLANG_AKHIR", "SEGMENT_BARU"]
+        ed = st.data_editor(t0, key=f"cl_{ss.get('cl_ver', 0)}_{int(hanya)}", hide_index=True, width="stretch",
+                            disabled=[c for c in t0.columns if c not in edit], column_config=cfg)
+        if not ed[edit].fillna("").astype(str).equals(t0[edit].fillna("").astype(str)):
+            ss["cl"] = terapkan_edit_cleansing(cl, ed)
+            ss["cl_ver"] = ss.get("cl_ver", 0) + 1
+            _rerun(st)
+    st.divider()
+    if st.button("Lanjut: Cocokkan dengan Master", type="primary", key="lanjut_master"):
+        try:
+            with st.spinner("Mencocokkan dengan data master..."):
+                ss["run_args"]["df_bersih"] = ss["cl"]
+                _jalankan(st, {})
+                ss["tahap"] = 2
+        except Exception as e:
+            st.error(f"Gagal: {e}")
+            return
+        _rerun(st)
+
+
+def _notif_kolom(st, jenis, kb, km):
+    """Notifikasi kecocokan kolom yang dipilih pada data baru terhadap kolom pada data master."""
+    norm = lambda v: re.sub(r"[^A-Z0-9]", "", str(v).upper())
+    if kb is None or km is None:
+        st.warning(f"Kolom {jenis} belum dipilih pada data baru atau data master.")
+    elif norm(kb) == norm(km):
+        st.success(f"Kolom {jenis} sesuai: '{kb}'.")
+    else:
+        st.warning(f"Kolom {jenis} berbeda: data baru '{kb}', data master '{km}'. Pastikan kedua kolom memuat data yang sama.")
+
+
 def page_update(st):
-    st.subheader("Update mingguan")
+    st.subheader("Update Data Baru")
     if not db_ready():
-        st.warning("Master belum ada di database. Buka menu 'Inisialisasi master' dulu.")
+        st.warning("Master belum ada di database. Buka menu 'Inisialisasi master' terlebih dahulu.")
         return
     n, last = master_info()
     c1, c2, c3 = st.columns(3)
@@ -1877,15 +2124,8 @@ def page_update(st):
     if load_pedoman() is None:
         st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). Tanpa pedoman, kota/segmen baru tidak bisa diberi ID.")
 
-    f_baru = st.file_uploader("Upload data baru mingguan (.xlsx)", type=["xlsx"])
-    with st.expander("Opsi umum"):
-        timpa = False
-        lewati = st.checkbox(
-            "Lewati data yang sama persis dengan master (nama + kota + segmen)", value=True,
-            help="Baris yang nama, kota, dan segmennya (setelah cleansing) sudah ada di master tidak diberi ID baru.")
-        fallback = ""
-        batch_week = st.text_input("Batch week", value=minggu_default(),
-                                   help="Label batch, disimpan di kolom batch_week pada baris baru.")
+    f_baru = st.file_uploader("Upload data baru (.xlsx)", type=["xlsx"])
+    timpa, lewati, fallback = False, True, ""
 
     if f_baru:
         data = f_baru.getvalue()
@@ -1897,8 +2137,7 @@ def page_update(st):
         daftar = list(sh_baru)
         st.caption("Sheet di file: " + ", ".join(f"{k} ({len(v):,} baris)" for k, v in sh_baru.items()))
         sheet_baru = st.selectbox(
-            "Sheet data baru", daftar, index=daftar.index("Data_Baru") if "Data_Baru" in daftar else 0)
-        sheet_match = "(tidak ada)"
+            "Pilih sheet data baru", daftar, index=daftar.index("Data_Baru") if "Data_Baru" in daftar else 0)
 
         # ---- pencocokan cust_id ----
         kol_b = ["(tidak ada)"] + list(sh_baru[sheet_baru].columns)
@@ -1908,55 +2147,64 @@ def page_update(st):
             d = deteksi_kolom(df_ref, jenis)
             return wadah.selectbox(label, opsi, index=opsi.index(d) if d in opsi else 0, key=f"{label}_{jenis}")
 
+        def _o(v):
+            return None if v == "(tidak ada)" else v
+
         with st.expander("Pencocokan cust_id & tail (keputusan per baris di tab 'Keputusan cust_id')", expanded=True):
             aktif = st.checkbox("Aktifkan pencocokan cust_id", value=True)
             ca, cb = st.columns(2)
             ca.markdown("**Kolom di data baru**")
             cb.markdown("**Kolom di master**")
+            ref_m = pd.DataFrame(columns=kol_m[1:])
             cb_id = _pilih(ca, "cust_id (data baru)", kol_b, "cust_id", sh_baru[sheet_baru])
-            cm_id = _pilih(cb, "cust_id (master)", kol_m, "cust_id", pd.DataFrame(columns=kol_m[1:]))
+            cm_id = _pilih(cb, "cust_id (master)", kol_m, "cust_id", ref_m)
             cb_al = _pilih(ca, "alamat (data baru)", kol_b, "alamat", sh_baru[sheet_baru])
-            cm_al = _pilih(cb, "alamat (master)", kol_m, "alamat", pd.DataFrame(columns=kol_m[1:]))
+            cm_al = _pilih(cb, "alamat (master)", kol_m, "alamat", ref_m)
             cb_di = _pilih(ca, "distributor (data baru)", kol_b, "distributor", sh_baru[sheet_baru])
-            cm_di = _pilih(cb, "distributor (master)", kol_m, "distributor", pd.DataFrame(columns=kol_m[1:]))
-            s1, s2 = st.columns(2)
-            a_nama = s1.slider("Ambang mirip nama", 0.5, 1.0, 0.80, 0.01,
-                               help="Hanya memengaruhi kolom SARAN di tab Keputusan cust_id (skor ≥ ambang dianggap mirip). Tidak ada aksi otomatis.")
-            a_alamat = s2.slider("Ambang mirip alamat", 0.5, 1.0, 0.70, 0.01)
+            cm_di = _pilih(cb, "distributor (master)", kol_m, "distributor", ref_m)
+            _notif_kolom(st, "cust_id", _o(cb_id), _o(cm_id))
+            _notif_kolom(st, "alamat", _o(cb_al), _o(cm_al))
+            _notif_kolom(st, "distributor", _o(cb_di), _o(cm_di))
             khusus = st.text_input("Distributor yang cust_id tail-nya (setelah tanda '-') ikut dicocokkan", "KFTD, AAM")
             lingkup = st.checkbox("Cocokkan cust_id hanya di distributor yang sama", value=True,
                                   help="Berlaku jika kolom distributor ada di data baru & master.")
-            st.caption("Keputusan untuk baris yang cocok (cust_id sama persis / tail) dibuat per baris di tab 'Keputusan cust_id'.")
-
-        def _o(v):
-            return None if v == "(tidak ada)" else v
 
         cust_cfg = None
         if aktif:
             cust_cfg = {
                 "kol_baru": {"cust_id": _o(cb_id), "alamat": _o(cb_al), "distributor": _o(cb_di)},
                 "kol_master": {"cust_id": _o(cm_id), "alamat": _o(cm_al), "distributor": _o(cm_di)},
-                "ambang_nama": a_nama, "ambang_alamat": a_alamat, "lingkup_distributor": lingkup, "min_tail": 3,
+                "ambang_nama": 0.80, "ambang_alamat": 0.70, "lingkup_distributor": lingkup, "min_tail": 3,
                 "distributor_khusus": [x.strip() for x in khusus.split(",") if x.strip()],
             }
         if hash_sudah_disimpan(h):
             st.warning("File ini identik dengan file yang sudah pernah disimpan ke master.")
-        if st.button("Jalankan cek & cleansing", type="primary"):
+        if st.button("Jalankan Cleansing Data", type="primary"):
             try:
-                with st.spinner("Memproses..."):
-                    st.session_state["run_args"] = dict(
-                        timpa=timpa, fallback=fallback, sheet_baru=sheet_baru, lewati=lewati,
-                        sheet_match=None if sheet_match == "(tidak ada)" else sheet_match, cust_cfg=cust_cfg)
-                    _jalankan(st, {})
-                    st.session_state.update(
-                        fname=nama_file_master(), base_ver=last[0] if last else 0,
-                        hash=h, nama_file=f_baru.name, saved=False, batch_week=batch_week)
+                with st.spinner("Memproses cleansing..."):
+                    ss = st.session_state
+                    c = cache_db(st)
+                    murni = siapkan_murni(sh_baru, sheet_baru)
+                    kb = (cust_cfg or {}).get("kol_baru") or {}
+                    cl = clean_dataframe_baru(murni, c["pedoman"], c["kec"], kb.get("alamat"))
+                    kol_cl = {k: (kb.get(k) or deteksi_kolom(cl, k)) for k in ("alamat", "distributor", "cust_id")}
+                    ss["run_args"] = dict(timpa=timpa, fallback=fallback, sheet_baru=sheet_baru, lewati=lewati,
+                                          sheet_match=None, cust_cfg=cust_cfg)
+                    ss.update(cl=cl, cl_ver=0, kol_cl=kol_cl, kec_ada=bool(c["kec"]), tahap=1, res=None, rv=None,
+                              pedoman=c["pedoman"], known=c["known"], fname=nama_file_master(),
+                              base_ver=last[0] if last else 0, hash=h, nama_file=f_baru.name, saved=False,
+                              batch_week=minggu_default(), sama_pilih=None, cust_pilih=None)
+                    ss.pop("xlsx", None)
             except Exception as e:
                 st.error(f"Gagal: {e}")
                 return
 
     def _isi():
-        tampil_hasil_update(st)
+        tahap = st.session_state.get("tahap")
+        if tahap == 2:
+            tampil_hasil_update(st)
+        elif tahap == 1:
+            tampil_cleansing(st)
 
     _fragment(st, _isi)
 
@@ -1993,9 +2241,7 @@ def pilih_tab(st, label_tab):
 
         st.segmented_control("Tampilan", list(label_tab), format_func=fmt, key="tab_widget", on_change=_sinkron,
                              label_visibility="collapsed")
-        aktif = ss["tab_aktif"]
-        st.markdown(f":{WARNA_TAB.get(aktif, 'blue')}-background[**Sedang dibuka: {label_tab[aktif]}**]")
-        return aktif
+        return ss["tab_aktif"]
     return st.radio("Tampilan", list(label_tab), format_func=fmt, key="tab_aktif", horizontal=True, label_visibility="collapsed")
 
 
@@ -2008,6 +2254,9 @@ def tampil_hasil_update(st):
         return
     rv = st.session_state["rv"]
     st.divider()
+    if st.button("Kembali ke hasil cleansing", key="kembali_cl", disabled=bool(st.session_state.get("saved"))):
+        st.session_state["tahap"] = 1
+        _rerun(st)
     st.write(f"Hasil untuk file: **{st.session_state['nama_file']}**")
     ada_master = rv["ID_MASTER_SAMA"].fillna("").astype(str).str.strip() != ""
     aktif = rv[~rv["BUANG"] & ~(rv["GABUNG"] & ada_master)]
@@ -2017,8 +2266,7 @@ def tampil_hasil_update(st):
     n_perlu, n_setuju = int(perlu.sum()), int((perlu & aktif["SETUJU"]).sum())
     n_noid = int((aktif["ID_STR_OUTLET"] == "").sum())
     stats = dict(res["stats"])
-    stats.update({"Calon ID baru": len(aktif), "Digabung ke outlet master (Review)": n_gab_rv,
-                  "Perlu disetujui": n_perlu, "Sudah disetujui": n_setuju, "Nama masih kotor": n_kotor})
+    stats["Calon ID_BARU baru"] = len(aktif)
     items = list(stats.items())
     for i in range(0, len(items), 4):
         cols = st.columns(4)
@@ -2088,7 +2336,7 @@ def tampil_hasil_update(st):
             "SETUJU": st.column_config.CheckboxColumn(
                 "SETUJU", pinned=True, help="Centang bila baris sudah dicek dan disetujui."),
             "BUANG": st.column_config.CheckboxColumn(
-                "BUANG", pinned=True, help="Centang bila tidak jadi membuat ID baru (duplikat / tidak diproses)."),
+                "HAPUS", pinned=True, help="Centang bila baris tidak jadi dibuat ID baru (duplikat / tidak diproses)."),
             "KOTA_BARU": col_kota,
             "PNAMLANG_AKHIR": st.column_config.TextColumn("PNAMLANG_AKHIR (edit)"),
             "SEGMENT_BARU": st.column_config.TextColumn("SEGMENT_BARU (edit)"),
@@ -2142,7 +2390,7 @@ def tampil_hasil_update(st):
                          hide_index=True, width="stretch")
             lab = st.selectbox("KEPUTUSAN", OPSI_SAMA, index=OPSI_SAMA.index(lab_now), key=k + "_d",
                                help="ID BARU (outlet berbeda) = dibuatkan ID baru. GABUNG KE MASTER = outlet yang sama, jadi row baru "
-                                    "ber-ID_STR_OUTLET master. BUANG = tidak diproses.")
+                                    "ber-ID_STR_OUTLET master.")
         with c2:
             st.markdown(f"{LABEL_LAMA}Data master {id_m} ({int(r['JML_ROW_MASTER_SAMA'] or 0)} baris, diurutkan dari yang paling mirip)")
             st.dataframe(master_serupa(res["master_lama"], id_m, r["PNAMLANG_AKHIR"], r.get(kol_ab) if kol_ab else None),
@@ -2227,7 +2475,7 @@ def tampil_hasil_update(st):
             st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). ID hanya bisa dibuat dari prefix master.")
         st.caption("KOTA_BARU, SEGMENT_BARU, dan PNAMLANG_AKHIR bisa diedit langsung; mengubah KOTA_BARU/SEGMENT_BARU otomatis "
                    "mengubah PNAMLANG_AKHIR dan ID. Baris yang punya CATATAN_CEK (termasuk nama masih kotor) harus diputuskan "
-                   "dicentang SETUJU setelah dicek, atau dicentang BUANG bila duplikat yang tidak jadi dibuat ID baru. "
+                   "dicentang SETUJU setelah dicek, atau dicentang HAPUS bila duplikat yang tidak jadi dibuat ID baru. "
                    "Baris yang nama+kota+segmennya sama dengan outlet master ada di tab 'Sama dengan outlet master'.")
         _tabel_review()
 
@@ -2246,9 +2494,9 @@ def tampil_hasil_update(st):
         st.warning("Hasil ini belum disimpan ke master.")
         blok = []
         if n_noid:
-            blok.append(f"{n_noid} baris belum punya ID (perbaiki kota/segmen di tab Review atau putuskan BUANG).")
+            blok.append(f"{n_noid} baris belum punya ID (perbaiki kota/segmen di tab Review atau putuskan HAPUS).")
         if n_perlu - n_setuju:
-            blok.append(f"{n_perlu - n_setuju} baris bertanda perlu dicek belum diputuskan (SETUJU / GABUNG / BUANG).")
+            blok.append(f"{n_perlu - n_setuju} baris bertanda perlu dicek belum diputuskan (SETUJU / GABUNG / HAPUS).")
         for b in blok:
             st.error(b)
         ok = st.checkbox("Saya sudah memeriksa hasil di atas dan siap menyimpan ke master")
@@ -2279,7 +2527,7 @@ def tampil_hasil_update(st):
 
 BAGIAN_CUST = (
     ("CUST_ID", "Cust_id sama persis dengan master",
-     "Outlet yang sama dengan cust_id yang sama. Biasanya dieliminasi, atau PNAMLANG master ditimpa bila nama berubah.",
+     "Outlet yang sama dengan cust_id yang sama. Biasanya dihapus, atau nama master diperbarui bila nama berubah.",
      ["TIMPA", "ELIMINASI", "BARU"]),
     ("TAIL", "Hanya tail cust_id yang sama (distributor khusus)",
      "Ujung cust_id sama dengan outlet master tetapi cust_id lengkapnya berbeda. Biasanya digabung sebagai row baru di outlet tersebut.",
@@ -2335,7 +2583,7 @@ def ui_tab_cust(st, res, rv, opsi_kota):
     st.caption(f"{LABEL_BARU}= DATA_BARU, {LABEL_LAMA}= DATA_LAMA (master). Kolom KEPUTUSAN, PNAMLANG_BARU, KOTA_BARU, dan "
                "PNAMLANG_MASTER bisa diedit langsung di tabel; ID_STR_OUTLET_BARU terisi otomatis bila KEPUTUSAN = ID BARU (nomor urut) "
                "atau GABUNG ROW (ID outlet master). Baris yang dibiarkan '(belum diputuskan)' tidak diubah dan tidak ikut disimpan. "
-               "TIMPA NAMA = PNAMLANG_AKHIR seluruh baris master ber-ID_STR sama diganti nama baru. GABUNG ROW = baris baru ditambahkan "
+               "PERBARUI NAMA MASTER = PNAMLANG_AKHIR seluruh baris master ber-ID_STR sama diganti nama baru. GABUNG ROW = baris baru ditambahkan "
                "ke outlet master. ID BARU = bukan outlet yang sama. Setiap perubahan diterapkan langsung; centang DETAIL untuk membuka "
                "perbandingan dengan data master di bawah tabel (edit di tabel dan panel saling mengikuti).")
     hanya = st.checkbox("Tampilkan hanya yang belum diputuskan", value=False, key="hanya_cust")
@@ -2535,9 +2783,9 @@ def main():
         st.error(f"Tidak dapat terhubung ke database Neon: {e}")
         st.info("Periksa DATABASE_URL di Settings > Secrets (harus memuat ?sslmode=require).")
         st.stop()
-    menu = st.sidebar.radio("Menu", ["Update mingguan", "Inisialisasi master", "Pedoman ID", "Riwayat & unduh"])
+    menu = st.sidebar.radio("Menu", ["Update Data Baru", "Inisialisasi master", "Pedoman ID", "Riwayat & unduh"])
     st.sidebar.caption("Database: Neon PostgreSQL")
-    {"Update mingguan": page_update, "Inisialisasi master": page_inisialisasi, "Pedoman ID": page_pedoman,
+    {"Update Data Baru": page_update, "Inisialisasi master": page_inisialisasi, "Pedoman ID": page_pedoman,
      "Riwayat & unduh": page_riwayat}[menu](st)
 
 
