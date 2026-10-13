@@ -1973,6 +1973,20 @@ def opsi_kota_ped(pedoman, tampil_kota, sekarang=""):
     return opsi + tambahan
 
 
+SEGMENT_OPSI = ["APT", "HANDOVER", "INS", "INS.PST", "KFA", "MMR", "PBF", "PKM", "PMI", "POL", "RET", "RS.PEM", "RS.SWA",
+                "RS.TNI-POL", "RS.UNIV", "TDR", "TDR.PST", "TOB", "USE", "LAB", "PEHA"]
+
+
+def opsi_segment(tampil=(), sekarang=""):
+    """Pilihan SEGMENT_BARU (dropdown). Nilai di luar daftar yang sedang dipakai ditambahkan di akhir agar tidak hilang."""
+    extra = sorted({str(v) for v in list(tampil) + [sekarang] if _t(v) and str(v) not in SEGMENT_OPSI})
+    return SEGMENT_OPSI + extra
+
+
+def col_segment(st, opsi, label="SEGMENT_BARU (pilih)"):
+    return st.column_config.SelectboxColumn(label, options=opsi, help="Pilih salah satu segmen.")
+
+
 def _tt(v):
     s_ = _str_val(v)
     return "" if s_ is None else s_
@@ -2065,18 +2079,13 @@ def tampil_cleansing(st):
     st.write(f"File: **{ss['nama_file']}** ({len(cl):,} baris)")
     if not pedoman:
         st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). Kota dan segmen tidak dapat divalidasi.")
-    if not ss.get("kec_ada"):
-        st.info("Master wilayah belum tersedia di database (menu 'Master Wilayah'), sehingga pencocokan kecamatan pada alamat dilewati.")
     t_full = tabel_cleansing(cl, kol, pedoman)
-    n_cc = ss.get("n_cust_cocok") or 0
-    if n_cc:
-        st.info(f"{n_cc} baris cocok dengan data master lewat CUST_ID/CUST_ID TAIL ({n_cc} belum diputuskan).")
     n_kt = sum(1 for n_ in cl["PNAMLANG_AKHIR"] if cek_nama_kotor(n_))
     if n_kt:
         st.warning(f"{n_kt} baris PNAMLANG_AKHIR masih kotor.")
     n_cek = int((t_full["CATATAN_CEK"] != "").sum())
     st.caption("Periksa hasil cleansing. Kolom KOTA_BARU, PNAMLANG_AKHIR, dan SEGMENT_BARU dapat diedit; mengubah KOTA_BARU atau "
-               "SEGMENT_BARU otomatis memperbarui PNAMLANG_AKHIR. Pencocokan dengan master dan keputusan dilakukan pada tahap 2.")
+               "SEGMENT_BARU otomatis memperbarui PNAMLANG_AKHIR. Pencocokan dan keputusan dilakukan pada tahap 2.")
     st.write(f"Baris dengan catatan pemeriksaan: **{n_cek:,}** dari {len(t_full):,}")
     hanya = st.checkbox("Tampilkan hanya data yang memerlukan pemeriksaan", value=False, key="hanya_cl")
     t0 = t_full[t_full["CATATAN_CEK"] != ""] if hanya else t_full
@@ -2085,6 +2094,7 @@ def tampil_cleansing(st):
     else:
         t0 = t0.copy()
         t0["KOTA_BARU"] = t0["KOTA_BARU"].map(lambda v: v if _t(v) else None).astype(object)
+        t0["SEGMENT_BARU"] = t0["SEGMENT_BARU"].map(lambda v: v if _t(v) else None).astype(object)
         t0.insert(0, "NO.", [int(i_) + 1 for i_ in t0.index])
         opsi_k = opsi_kota_ped(pedoman, t0["KOTA_BARU"].dropna())
         if opsi_k:
@@ -2098,7 +2108,7 @@ def tampil_cleansing(st):
             "CATATAN_CEK": st.column_config.TextColumn("CATATAN PEMERIKSAAN"),
             "PNAMLANG_AKHIR": st.column_config.TextColumn("PNAMLANG_AKHIR (edit)"),
             "KOTA_BARU": col_kota,
-            "SEGMENT_BARU": st.column_config.TextColumn("SEGMENT_BARU (edit)"),
+            "SEGMENT_BARU": col_segment(st, opsi_segment(t0["SEGMENT_BARU"].dropna())),
         }
         edit = ["KOTA_BARU", "PNAMLANG_AKHIR", "SEGMENT_BARU"]
         ed = st.data_editor(t0, key=f"cl_{ss.get('cl_ver', 0)}_{int(hanya)}", hide_index=True, width="stretch",
@@ -2183,8 +2193,6 @@ def page_update(st):
             "ambang_nama": 0.80, "ambang_alamat": 0.70, "lingkup_distributor": True, "min_tail": 3,
             "distributor_khusus": ["KFTD", "AAM"],
         }
-        if hash_sudah_disimpan(h):
-            st.warning("File ini identik dengan file yang sudah pernah disimpan ke master.")
         if st.button("Jalankan Cleansing Data", type="primary"):
             try:
                 with st.spinner("Memproses cleansing..."):
@@ -2385,6 +2393,7 @@ def tampil_hasil_update(st):
             return
         no_r = pd.Series(range(1, len(d) + 1), index=d.index)
         tampil = tampil.copy()
+        tampil["SEGMENT_BARU"] = tampil["SEGMENT_BARU"].map(lambda v: v if _t(v) else None).astype(object)
         tampil.insert(0, "NO.", no_r.loc[tampil.index].values)
         opsi_k = _opsi_kota(tampil["KOTA_BARU"].dropna())
         if opsi_k:
@@ -2401,7 +2410,7 @@ def tampil_hasil_update(st):
                 "HAPUS", pinned=True, help="Centang bila baris tidak jadi dibuat ID baru (duplikat / tidak diproses)."),
             "KOTA_BARU": col_kota,
             "PNAMLANG_AKHIR": st.column_config.TextColumn("PNAMLANG_AKHIR (edit)"),
-            "SEGMENT_BARU": st.column_config.TextColumn("SEGMENT_BARU (edit)"),
+            "SEGMENT_BARU": col_segment(st, opsi_segment(tampil["SEGMENT_BARU"].dropna())),
             "ID_STR_OUTLET": st.column_config.TextColumn("ID_STR_OUTLET (pratinjau)"),
             "NO.": kolom_no(st),
             "CATATAN_CEK": st.column_config.TextColumn("CATATAN PEMERIKSAAN"),
@@ -2446,7 +2455,10 @@ def tampil_hasil_update(st):
                                     index=opsi_k.index(kota_now) if kota_now in opsi_k else None, key=k + "_k") or ""
             else:
                 kota = st.text_input("KOTA_BARU (edit)", value=kota_now, key=k + "_k")
-            seg = st.text_input("SEGMENT_BARU (edit)", value=_t(r["SEGMENT_BARU"]), key=k + "_s")
+            seg_now = _t(r["SEGMENT_BARU"])
+            opsi_s = opsi_segment([], seg_now)
+            seg = st.selectbox("SEGMENT_BARU (pilih)", opsi_s, index=opsi_s.index(seg_now) if seg_now in opsi_s else None,
+                               key=k + "_s") or ""
             kol_cid, kol_dis = deteksi_kolom(rv, "cust_id"), deteksi_kolom(rv, "distributor")
             info = [("PNAMLANG_ASAL", r.get("PNAMLANG_ASAL")), ("ALAMAT_BARU", r.get(kol_ab) if kol_ab else None),
                     ("CUST_ID", r.get(kol_cid) if kol_cid else None), ("DISTRIBUTOR", r.get(kol_dis) if kol_dis else None)]
@@ -2546,6 +2558,25 @@ def tampil_hasil_update(st):
         m1.metric("Nama masih kotor", int(kotor_.sum()))
         m2.metric("Sudah diputuskan", int(putus.sum()))
         m3.metric("Belum diputuskan", int(belum_.sum()))
+        if not st.session_state.get("saved"):
+            target = ~ada_master & ~rv["BUANG"].astype(bool)
+            a1, a2, _ = st.columns([1, 1, 3])
+            if a1.button(f"Setujui semua ({int(target.sum())})", key="setuju_semua", disabled=not target.any(),
+                         help="Mencentang SETUJU pada semua baris di tab ini yang belum dihapus. Periksa dulu catatan pemeriksaan."):
+                baru_ = rv.copy()
+                baru_.loc[target, "SETUJU"] = True
+                st.session_state["rv"] = baru_
+                st.session_state["rv_ver"] += 1
+                st.session_state.pop("xlsx", None)
+                _rerun(st)
+            if a2.button("Batalkan semua setuju", key="batal_setuju",
+                         disabled=not bool((~ada_master & rv["SETUJU"].astype(bool)).any())):
+                baru_ = rv.copy()
+                baru_.loc[~ada_master, "SETUJU"] = False
+                st.session_state["rv"] = baru_
+                st.session_state["rv_ver"] += 1
+                st.session_state.pop("xlsx", None)
+                _rerun(st)
         _tabel_review()
 
     if tab == "sama":
