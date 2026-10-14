@@ -234,14 +234,14 @@ def cari_kota_dari_kecamatan(alamat, kota, kec_idx):
 # CHANNEL OUTLET -> SEGMENT. Hanya channel yang pasti; selain itu tidak dikonversi (segmen diisi manual).
 # Urutan penting: pola yang lebih spesifik lebih dulu. KLINIK (termasuk KLINIK PRATAMA / KLINIK UTAMA) -> POL.
 CHANNEL_KE_SEGMENT = [
-    (re.compile(r"^PHARMACY REGULAR\b"), "APT"),
-    (re.compile(r"^HOSPITAL PRIVATE\b"), "RS.SWA"),
+    (re.compile(r"^PHARMACY REGULAR \(REG\)$"), "APT"),
+    (re.compile(r"^HOSPITAL PRIVATE \(PVT\)$"), "RS.SWA"),
     (re.compile(r"^PUSKESMAS\b"), "PKM"),
     (re.compile(r"^APOTEK\b"), "APT"),
     (re.compile(r"^DINKES\b"), "TDR"),
     (re.compile(r"^PBF (REGULAR|SUBDIST)\b"), "PBF"),
     (re.compile(r"^KLINIK\b"), "POL"),
-    (re.compile(r"^HEALTH PUBLIC CENTRE PUSKESMAS\b"), "PKM"),
+    (re.compile(r"^HEALTH PUBLIC CENTRE \(PUSKESMAS\)$"), "PKM"),
     (re.compile(r"^RUMAH SAKIT SWASTA\b"), "RS.SWA"),
 ]
 SEGMENT_SETARA = {"DINKES": "TDR"}   # segmen DINKES (hasil deteksi nama 'DINAS KESEHATAN') dianggap sama dengan TDR
