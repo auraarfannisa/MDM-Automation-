@@ -1905,7 +1905,6 @@ def page_inisialisasi(st):
             st.session_state["init_hash"] = hm
         daftar = st.session_state["init_sheets"]
         sheet = st.selectbox("Sheet master", daftar, index=daftar.index("Hasil ID") if "Hasil ID" in daftar else 0)
-    f_wil = st.file_uploader("master_wilayah.csv (opsional)", type=["csv"], key="init_wil")
     konfirmasi = st.checkbox("Saya yakin", value=not db_ready())
     if st.button("Simpan ke database", type="primary", disabled=not (f_master and sheet and konfirmasi)):
         with st.spinner("Membaca dan menyimpan ke Neon..."):
@@ -1919,8 +1918,7 @@ def page_inisialisasi(st):
             df["ID_STR_OUTLET"] = df["ID_STR_OUTLET"].str.strip()
             df = df[df["ID_STR_OUTLET"].notna() & (df["ID_STR_OUTLET"] != "")]
             df, info = siapkan_master_std(df)
-            dwil = pd.read_csv(f_wil) if f_wil else None
-            simpan_master_awal(df, f_master.name, hashlib.sha256(data).hexdigest(), f"{len(df)} baris", dwil)
+            simpan_master_awal(df, f_master.name, hashlib.sha256(data).hexdigest(), f"{len(df)} baris")
         for i in info:
             st.caption(i)
         st.success(f"Master tersimpan: {len(df):,} baris. Lanjut ke menu 'Update Data Baru'.")
