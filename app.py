@@ -246,6 +246,8 @@ KOTA_PUSAT_DISTRIBUTOR = [
 ]
 # Nama yang dipakai orang berbeda dari nama administratif: PURWOKERTO adalah kota di dalam KAB. BANYUMAS.
 ALIAS_KOTA_PUSAT = {"PURWOKERTO": "BANYUMAS"}
+# True: SEMUA kota diperiksa (kecamatan di alamat harus ada di kota itu). False: hanya kota di KOTA_PUSAT_DISTRIBUTOR.
+PERIKSA_SEMUA_KOTA = True
 _KUNCI_PUSAT = {_kunci_teks(n): ALIAS_KOTA_PUSAT.get(n, n) for n in KOTA_PUSAT_DISTRIBUTOR}
 
 _RX_KEC = re.compile(
@@ -270,14 +272,20 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx):
     """Untuk kota pusat distributor: cek apakah kecamatan di alamat benar ada di kota itu. Kembalikan catatan atau ''.
     Kecamatan diambil dari penanda 'KEC. X'; bila tidak ada penanda, dari segmen terakhir alamat (kata 1-3 suku kata)
     yang dikenal di master wilayah. Kota tidak diubah."""
+    if not kec_idx or kota is None or alamat is None or pd.isna(kota) or pd.isna(alamat):
+        return ""
     nama = kota_pusat_distributor(kota)
-    if not nama or not kec_idx or alamat is None or pd.isna(alamat):
+    if not nama and not PERIKSA_SEMUA_KOTA:
         return ""
     a = re.sub(r"\s+", " ", str(alamat).upper())
     k = _norm_kab(kota)
     jenis_k, base_k = kunci_wilayah(k)
+    if not base_k:
+        return ""
+    nama = nama or k                            # kota di luar daftar: dibandingkan dengan namanya sendiri
     resmi = jenis_k in ("KAB", "KOTA")          # kota sudah berawalan KAB./KOTA: kecamatan harus ada di kab/kota yang persis sama
-    kunci_nama = _kunci_teks(ALIAS_KOTA_PUSAT.get(nama, nama))
+    kunci_nama = _kunci_teks(ALIAS_KOTA_PUSAT.get(nama, nama)) if nama in ALIAS_KOTA_PUSAT else (
+        _kunci_teks(nama) if nama in _KUNCI_PUSAT.values() else base_k)
 
     def di_kota(kab):
         j, b = kunci_wilayah(kab)
