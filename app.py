@@ -241,6 +241,8 @@ CHANNEL_KE_SEGMENT = [
     (re.compile(r"^DINKES\b"), "TDR"),
     (re.compile(r"^PBF (REGULAR|SUBDIST)\b"), "PBF"),
     (re.compile(r"^KLINIK\b"), "POL"),
+    (re.compile(r"^HEALTH PUBLIC CENTRE (PUSKESMAS)\b"), "PKM"),
+    (re.compile(r"^Rumah Sakit Swasta\b"), "RS.SWA"),
 ]
 SEGMENT_SETARA = {"DINKES": "TDR"}   # segmen DINKES (hasil deteksi nama 'DINAS KESEHATAN') dianggap sama dengan TDR
 
