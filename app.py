@@ -43,6 +43,15 @@ KAMUS_17_DAERAH = {
 }
 
 
+def kota_dari_kamus(val):
+    """True bila nama kota di data diganti lewat KAMUS_17_DAERAH (hasilnya sudah dipastikan benar, tidak perlu cek kecamatan)."""
+    if val is None or pd.isna(val):
+        return False
+    s = re.sub(r"^(VIVA\s+(APOTEK|APT\.?|FARMA)\b|APOTEK\s+VIVA\b)[\s\-\:\.]*", "", str(val).strip(), flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip().upper()
+    return s in KAMUS_17_DAERAH or re.sub(r"[^A-Z0-9]", "", s) in KAMUS_17_DAERAH
+
+
 def clean_viva_dan_daerah(val):
     if pd.isna(val):
         return val
@@ -394,7 +403,8 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None):
     kol_a = kol_alamat if (kol_alamat and kol_alamat in df.columns) else deteksi_kolom(df, "alamat")
     if kec_idx and pedoman and kol_a:
         kota_n, cat_n = [], []
-        for k, a in zip(df["KOTA_BARU"], df[kol_a]):
+        dari_kamus = pick(df, "KOTA_CLEAN", "KOTA").map(kota_dari_kamus)   # kota sudah diganti lewat KAMUS_17_DAERAH
+        for k, a, kamus in zip(df["KOTA_BARU"], df[kol_a], dari_kamus):
             cat = ""
             if not pd.isna(k) and str(k).strip() and not pd.isna(a):
                 if not kota_resmi(k, pedoman):
@@ -402,7 +412,7 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None):
                     if kab:
                         kn = kanonik_kota(kab, pedoman)
                         cat, k = f"Kota ditentukan dari kecamatan di alamat ({k} -> {kn})", kn
-                if not cat:   # kota pusat distributor: kecamatan di alamat harus ada di kota itu (hanya catatan)
+                if not cat and not kamus:   # kecamatan di alamat harus ada di kota itu (hanya catatan); kota hasil kamus dikecualikan
                     cat = periksa_kecamatan_kota_pusat(a, k, kec_idx)
             kota_n.append(k)
             cat_n.append(cat)
