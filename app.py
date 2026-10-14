@@ -231,6 +231,64 @@ def cari_kota_dari_kecamatan(alamat, kota, kec_idx):
     return None, ""
 
 
+# CHANNEL OUTLET -> SEGMENT. Hanya channel yang pasti; selain itu tidak dikonversi (segmen diisi manual).
+# Urutan penting: pola yang lebih spesifik lebih dulu. KLINIK (termasuk KLINIK PRATAMA / KLINIK UTAMA) -> POL.
+CHANNEL_KE_SEGMENT = [
+    (re.compile(r"^PHARMACY REGULAR\b"), "APT"),
+    (re.compile(r"^HOSPITAL PRIVATE\b"), "RS.SWA"),
+    (re.compile(r"^PUSKESMAS\b"), "PKM"),
+    (re.compile(r"^APOTEK\b"), "APT"),
+    (re.compile(r"^DINKES\b"), "TDR"),
+    (re.compile(r"^PBF (REGULAR|SUBDIST)\b"), "PBF"),
+    (re.compile(r"^KLINIK\b"), "POL"),
+]
+SEGMENT_SETARA = {"DINKES": "TDR"}   # segmen DINKES (hasil deteksi nama 'DINAS KESEHATAN') dianggap sama dengan TDR
+
+
+def segment_dari_channel(ch):
+    """Segmen hasil konversi CHANNEL OUTLET, atau None bila channel kosong / tidak termasuk daftar yang pasti."""
+    if ch is None or pd.isna(ch):
+        return None
+    s = re.sub(r"[\s_]+", " ", str(ch).strip().upper())
+    for rx, seg in CHANNEL_KE_SEGMENT:
+        if rx.search(s):
+            return seg
+    return None
+
+
+def segmen_dari_channel_df(seg, channel):
+    """Isi segmen kosong dari channel dan cek kecocokan segmen yang sudah ada. Kembalikan (segmen, catatan) per baris."""
+    seg_out, cat_out = [], []
+    for s0, ch in zip(seg, channel):
+        s_ = "" if s0 is None or pd.isna(s0) else str(s0).strip().upper()
+        ch_t = "" if ch is None or pd.isna(ch) else str(ch).strip()
+        sk = segment_dari_channel(ch)
+        cat = ""
+        if sk:
+            if not s_:
+                s0, cat = sk, f"Segmen kosong, diisi dari CHANNEL OUTLET ({ch_t} -> {sk})"
+            elif SEGMENT_SETARA.get(s_, s_) != SEGMENT_SETARA.get(sk, sk):
+                cat = f"Segmen {s_} tidak sesuai CHANNEL OUTLET ({ch_t} -> {sk}); periksa"
+        elif not s_ and ch_t:
+            cat = f"Segmen kosong dan CHANNEL OUTLET '{ch_t}' tidak bisa dikonversi otomatis; isi manual"
+        seg_out.append(s0)
+        cat_out.append(cat)
+    return seg_out, cat_out
+
+
+# Kolom data baru yang namanya diseragamkan agar cocok dengan kolom di master (nama kunci = tanpa spasi/tanda baca)
+ALIAS_KOLOM_BARU = {"NAMAGROUPCHAIN": "NAMA_GROUP_CHAIN", "GROUPRSSWASTACHAINOTHERS": "GROUP_RS_SWASTA_CHAIN_OTHERS"}
+
+
+def samakan_nama_kolom(d):
+    ren = {}
+    for c in d.columns:
+        baku = ALIAS_KOLOM_BARU.get(re.sub(r"[^A-Z0-9]", "", str(c).upper()))
+        if baku and c != baku:
+            ren[c] = baku
+    return d.rename(columns=ren) if ren else d
+
+
 def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None):
     """Cleansing kota + nama + segmen pada data calon outlet baru (PNAMLANG_AKHIR = NAMA (KOTA), SUFFIX).
     Dengan `pedoman`, KOTA_BARU dinormalkan ke nama resmi pedoman (tambah KAB./KOTA, perbaiki spasi)."""
@@ -256,6 +314,10 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None):
     df["PNAMLANG_ASAL"] = pick(df, "PNAMLANG", "PNAMLANG_CLEAN")  # nama sebelum cleansing
     nama = pick(df, "PNAMLANG_CLEAN", "PNAMLANG")
     seg = pick(df, "SEGMENT_CLEAN", "SEGMENT")
+    kol_ch = deteksi_kolom(df, "channel")
+    seg_l, cat_seg = segmen_dari_channel_df(seg, df[kol_ch] if kol_ch else [None] * len(df))
+    df["_CAT_SEG"] = pd.Series(cat_seg, index=df.index, dtype=object)
+    seg = pd.Series(seg_l, index=df.index, dtype=object)
     parts = [clean_name_parts(n, s) for n, s in zip(nama, seg)]
     df["_NAMA_DASAR"] = [p[0] for p in parts]
     df["SEGMENT_BARU"] = [p[1] for p in parts]
@@ -283,6 +345,7 @@ KANDIDAT_KOLOM = {
     "cust_id": ["CUSTID", "CUSTOMERID", "IDCUST", "IDCUSTOMER", "KODECUSTOMER", "KODECUST"],
     "alamat": ["ALAMAT", "ALAMATCLEAN", "ALAMAT1", "ADDRESS", "ALAMATLENGKAP"],
     "distributor": ["DISTRIBUTOR", "NAMADISTRIBUTOR", "DISTRIBUTORNAME", "KODEDISTRIBUTOR", "DISTRIB", "DIST"],
+    "channel": ["CHANNELOUTLET", "CHANNEL"],
 }
 STOP_NAMA = {"APOTEK", "APOTIK", "APT", "KLINIK", "RS", "RSU", "RUMAH", "SAKIT", "TOKO", "PT", "CV", "UD"}
 STOP_ALAMAT = {"JL", "JALAN", "NO", "NOMOR", "RT", "RW", "KEL", "KELURAHAN", "KEC", "KECAMATAN", "KAB", "KOTA"}
@@ -1447,7 +1510,7 @@ def _load_master_cd(ver):
 
 def load_master():
     n, last = master_info()
-    return _load_master_cd((n, last[0] if last else 0))
+    return _load_master_cd((n, last[0] if last else 0, len(table_columns())))   # jumlah kolom ikut kunci cache: kolom baru langsung terbaca
 
 
 def load_wilayah():
@@ -1799,7 +1862,7 @@ def tampil_filter_export(st, df, key, nama_dasar):
 def master_cached(st):
     """Master dari database, disimpan di session_state selama versinya (riwayat terakhir) belum berubah."""
     n, last = master_info()
-    ver = (last[0] if last else 0, n)
+    ver = (last[0] if last else 0, n, len(table_columns()))
     c = st.session_state.get("master_cache")
     if not c or c[0] != ver:
         st.session_state["master_cache"] = (ver, load_master())
@@ -1905,7 +1968,7 @@ def cache_db(st):
     """Master, wilayah, dan pedoman dari database disimpan di session_state selama file database belum berubah, supaya tiap
     keputusan tidak membaca ulang 86 ribu baris. 'mdm' menampung indeks cust_id & kunci duplikat yang dipakai run_mdm."""
     n_, last_ = master_info()
-    ver = (n_, last_[0] if last_ else 0)   # berubah setiap master berubah (jumlah baris / riwayat terakhir)
+    ver = (n_, last_[0] if last_ else 0, len(table_columns()))   # berubah setiap master berubah (jumlah baris / riwayat terakhir)
     c = st.session_state.get("db_cache")
     if not c or c["ver"] != ver:
         wil = load_wilayah()
@@ -1955,7 +2018,7 @@ def siapkan_murni(sheets_baru, sheet_baru):
     """Sheet data baru + nomor baris Excel; validasi kolom nama & kota."""
     if sheet_baru not in sheets_baru:
         raise ValueError(f"Sheet data baru '{sheet_baru}' tidak ditemukan. Sheet tersedia: {list(sheets_baru)}")
-    d = sheets_baru[sheet_baru].copy()
+    d = samakan_nama_kolom(sheets_baru[sheet_baru].copy())   # 'NAMA GROUP CHAIN' -> NAMA_GROUP_CHAIN, dst.
     d["BARIS_EXCEL"] = d.index + 2  # perkiraan nomor baris di Excel (baris 1 = header)
     for kolom, kandidat in (("nama", ("PNAMLANG_CLEAN", "PNAMLANG")), ("kota", ("KOTA_CLEAN", "KOTA"))):
         if not any(c in d.columns for c in kandidat):
@@ -1997,7 +2060,8 @@ def catatan_cleansing(cl, pedoman):
     seg_map = pedoman["seg"] if pedoman else {}
     wil_map = pedoman["wil"] if pedoman else {}
     out = []
-    for k, sg, n, ck in zip(cl["KOTA_BARU"], cl["SEGMENT_BARU"], cl["PNAMLANG_AKHIR"], cl["_CAT_KEC"]):
+    cat_seg = cl["_CAT_SEG"] if "_CAT_SEG" in cl.columns else [""] * len(cl)
+    for k, sg, n, ck, cs in zip(cl["KOTA_BARU"], cl["SEGMENT_BARU"], cl["PNAMLANG_AKHIR"], cl["_CAT_KEC"], cat_seg):
         notes, kk, ss_ = [], _norm_kab(k), _s(sg)
         if pedoman:
             if not ss_:
@@ -2021,6 +2085,8 @@ def catatan_cleansing(cl, pedoman):
             notes.append("Nama masih kotor: " + "; ".join(kotor))
         if _t(ck):
             notes.append(ck)
+        if _t(cs):
+            notes.append(cs)
         out.append("; ".join(notes))
     return pd.Series(out, index=cl.index, dtype=object)
 
@@ -2038,6 +2104,7 @@ def tabel_cleansing(cl, kol, pedoman):
         "KOTA_ASAL": cl["KOTA_ASAL"],
         "KOTA_BARU": cl["KOTA_BARU"],
         "SEGMENT_BARU": cl["SEGMENT_BARU"],
+        "CHANNEL_OUTLET": kolom("channel"),   # acuan pengisian/pengecekan segmen; hanya tampil di tahap 1
         "DISTRIBUTOR": kolom("distributor"),
         "CUST_ID": kolom("cust_id"),
     }, index=cl.index)
@@ -2049,7 +2116,9 @@ def tabel_cleansing(cl, kol, pedoman):
 def terapkan_edit_cleansing(cl, ed):
     """Terapkan edit KOTA_BARU / SEGMENT_BARU / PNAMLANG_AKHIR; nama akhir ikut kota & segmen bila nama tidak diedit langsung."""
     d = cl.copy()
-    for c in ("KOTA_BARU", "SEGMENT_BARU", "PNAMLANG_AKHIR", "_CAT_KEC"):
+    if "_CAT_SEG" not in d.columns:
+        d["_CAT_SEG"] = ""
+    for c in ("KOTA_BARU", "SEGMENT_BARU", "PNAMLANG_AKHIR", "_CAT_KEC", "_CAT_SEG"):
         d[c] = d[c].astype(object)
     for i in ed.index:
         k_old, s_old, n_old = _s(d.at[i, "KOTA_BARU"]), _s(d.at[i, "SEGMENT_BARU"]), _t(d.at[i, "PNAMLANG_AKHIR"])
@@ -2058,6 +2127,8 @@ def terapkan_edit_cleansing(cl, ed):
             continue
         if k_new != k_old:
             d.at[i, "_CAT_KEC"] = ""
+        if s_new != s_old:
+            d.at[i, "_CAT_SEG"] = ""   # segmen sudah diputuskan manual; catatan channel tidak relevan lagi
         d.at[i, "KOTA_BARU"] = k_new or None
         d.at[i, "SEGMENT_BARU"] = s_new or None
         if n_new != n_old:
@@ -2201,7 +2272,7 @@ def page_update(st):
                     murni = siapkan_murni(sh_baru, sheet_baru)
                     kb = (cust_cfg or {}).get("kol_baru") or {}
                     cl = clean_dataframe_baru(murni, c["pedoman"], c["kec"], kb.get("alamat"))
-                    kol_cl = {k: (kb.get(k) or deteksi_kolom(cl, k)) for k in ("alamat", "distributor", "cust_id")}
+                    kol_cl = {k: (kb.get(k) or deteksi_kolom(cl, k)) for k in ("alamat", "distributor", "cust_id", "channel")}
                     try:   # jumlah baris yang cust_id / tail-nya sudah ada di master (diputuskan di tahap 2)
                         n_cust = len(cocokkan_cust(cl, c["master"], cust_cfg, {}, cache=c["mdm"])["semua"]) if cust_cfg else 0
                     except Exception:
