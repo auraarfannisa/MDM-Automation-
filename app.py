@@ -199,6 +199,15 @@ def _kunci_teks(v):
     return re.sub(r"[^A-Z0-9]", "", str(v).upper())
 
 
+class IndeksKec(dict):
+    """Peta kecamatan -> set kab/kota. Atribut: .prov (kab/kota -> set provinsi) dan .kel ((kecamatan, kab/kota) -> set kelurahan),
+    dipakai untuk membedakan nama kecamatan yang kembar di banyak daerah."""
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.prov = {}
+        self.kel = {}
+
+
 def bangun_indeks_kecamatan(df_wil):
     """Peta kecamatan (tanpa spasi/tanda baca) -> set nama kab/kota (sudah dinormalkan) dari master wilayah."""
     if df_wil is None or not len(df_wil):
@@ -207,13 +216,24 @@ def bangun_indeks_kecamatan(df_wil):
     ck, cb = peta.get("KECAMATAN"), peta.get("KABUPATEN")
     if ck is None or cb is None:
         return None
-    d = df_wil[[ck, cb]].dropna().drop_duplicates()
-    idx = defaultdict(set)
-    for kec, kab in zip(d[ck], d[cb]):
+    cp, cl = peta.get("PROVINSI"), peta.get("KELURAHAN")
+    pakai = [c for c in (ck, cb, cp, cl) if c is not None]
+    d = df_wil[pakai].dropna(subset=[ck, cb]).drop_duplicates()
+    kosong = [None] * len(d)
+    idx = IndeksKec()
+    prov, kel = defaultdict(set), defaultdict(set)
+    for kec, kab, pv, kl in zip(d[ck], d[cb], d[cp] if cp else kosong, d[cl] if cl else kosong):
         key = _kunci_teks(kec)
-        if key:
-            idx[key].add(_norm_kab(kab))
-    return dict(idx) or None
+        if not key:
+            continue
+        kn = _norm_kab(kab)
+        idx.setdefault(key, set()).add(kn)
+        if pv is not None and not pd.isna(pv):
+            prov[kn].add(_kunci_teks(pv))
+        if kl is not None and not pd.isna(kl):
+            kel[(key, kn)].add(_kunci_teks(kl))
+    idx.prov, idx.kel = dict(prov), dict(kel)
+    return idx or None
 
 
 def kota_resmi(k, pedoman):
@@ -277,20 +297,31 @@ def kota_pusat_distributor(kota):
     return None
 
 
-def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx):
-    """Untuk kota pusat distributor: cek apakah kecamatan di alamat benar ada di kota itu. Kembalikan catatan atau ''.
-    Kecamatan diambil dari penanda 'KEC. X'; bila tidak ada penanda, dari segmen terakhir alamat (kata 1-3 suku kata)
-    yang dikenal di master wilayah. Kota tidak diubah."""
+# True: bila kecamatan 'KEC. X' tidak ada di kota yang tertulis dan kab/kota yang benar bisa dipastikan, KOTA_BARU diganti
+# otomatis (catatan tetap ditulis agar user memeriksa). False: hanya catatan berisi kota yang disarankan.
+KOREKSI_OTOMATIS_KOTA = True
+
+_RX_KEL = re.compile(
+    r"\b(?:KEL(?:URAHAN)?|DESA)\.?\s+([A-Z0-9][A-Z0-9 .']*?)"
+    r"(?=\s+(?:KEC(?:AMATAN)?|KAB(?:UPATEN)?|KOTA|PROV(?:INSI)?|RT|RW|NO)\b|\s*[,;()/]|$)")
+
+
+def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None):
+    """Cek apakah kecamatan di alamat benar ada di kota. Kembalikan (kota koreksi atau None, catatan atau '').
+    Kecamatan diambil dari penanda 'KEC. X'; bila tidak ada penanda, dari segmen terakhir alamat (hanya catatan, tidak
+    pernah mengubah kota). Kota diganti hanya bila tepat satu kab/kota yang masuk akal setelah nama kecamatan kembar
+    dipersempit dengan kelurahan di alamat ('KEL. Y') dan provinsi kota yang tertulis, dan buktinya kuat:
+    kelurahan cocok, atau provinsinya sama dengan kota yang tertulis."""
     if not kec_idx or kota is None or alamat is None or pd.isna(kota) or pd.isna(alamat):
-        return ""
+        return None, ""
     nama = kota_pusat_distributor(kota)
     if not nama and not PERIKSA_SEMUA_KOTA:
-        return ""
+        return None, ""
     a = re.sub(r"\s+", " ", str(alamat).upper())
     k = _norm_kab(kota)
     jenis_k, base_k = kunci_wilayah(k)
     if not base_k:
-        return ""
+        return None, ""
     nama = nama or k                            # kota di luar daftar: dibandingkan dengan namanya sendiri
     resmi = jenis_k in ("KAB", "KOTA")          # kota sudah berawalan KAB./KOTA: kecamatan harus ada di kab/kota yang persis sama
     kunci_nama = _kunci_teks(ALIAS_KOTA_PUSAT.get(nama, nama)) if nama in ALIAS_KOTA_PUSAT else (
@@ -300,20 +331,48 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx):
         j, b = kunci_wilayah(kab)
         return (j, b) == (jenis_k, base_k) if resmi else kunci_nama in b   # kota generik (mis. TEGAL, JAKARTA): KAB atau KOTA mana pun
 
+    def daftar(cands):
+        return ", ".join(sorted(cands)[:3]) + (" ..." if len(cands) > 3 else "")
+
     m = _RX_KEC.search(a)
     if m:
         kec_txt = m.group(1).strip(" .")
-        cands = kec_idx.get(_kunci_teks(kec_txt))
+        kk = _kunci_teks(kec_txt)
+        cands = kec_idx.get(kk)
         if not cands:
-            return ""                          # kecamatan tidak dikenal di master wilayah: tidak bisa diuji
+            return None, ""                    # kecamatan tidak dikenal di master wilayah: tidak bisa diuji
         if any(di_kota(c) for c in cands):
-            return ""
-        return (f"Alamat dan kota tidak sesuai: KEC. {kec_txt} tidak ada di {kota}"
-                f" (ada di {', '.join(sorted(cands)[:3])}{' ...' if len(cands) > 3 else ''})")
-    # tanpa penanda KEC.: segmen terakhir alamat
+            return None, ""
+        prov = getattr(kec_idx, "prov", {})
+        kelm = getattr(kec_idx, "kel", {})
+        prov_k = set()
+        for kab, pv in prov.items():
+            if di_kota(kab):
+                prov_k |= pv
+        narrowed, via_kel = set(cands), False
+        mk = _RX_KEL.search(a)
+        if mk:
+            kelk = _kunci_teks(mk.group(1).strip(" ."))
+            by_kel = {c for c in cands if kelk in kelm.get((kk, c), ())}
+            if by_kel:
+                narrowed, via_kel = by_kel, True
+        if len(narrowed) > 1 and prov_k:
+            sama = {c for c in narrowed if prov.get(c, set()) & prov_k}
+            if sama:
+                narrowed = sama
+        dasar = f"Alamat dan kota tidak sesuai: KEC. {kec_txt} tidak ada di {kota}"
+        if len(narrowed) == 1:
+            kab = next(iter(narrowed))
+            kuat = via_kel or bool(prov.get(kab, set()) & prov_k)
+            kanon = kanonik_kota(kab, pedoman)
+            if kuat and KOREKSI_OTOMATIS_KOTA:
+                return kanon, f"{dasar}; kota diubah otomatis ({kota} -> {kanon}), periksa kembali"
+            return None, f"{dasar}; kota yang disarankan: {kanon}. Pilih KOTA_BARU yang benar"
+        return None, f"{dasar}; ada di: {daftar(narrowed)}. Pilih KOTA_BARU secara manual"
+    # tanpa penanda KEC.: segmen terakhir alamat (hanya catatan)
     segs = [x.strip() for x in re.split(r"\s*[-,;/()]\s*", a) if x.strip()]
     if not segs:
-        return ""
+        return None, ""
     words = re.sub(r"[^A-Z0-9 ]", " ", segs[-1]).split()
     ditemukan = {}
     for n in range(min(len(words), 3), 0, -1):
@@ -323,12 +382,11 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx):
             if cands:
                 ditemukan[teks] = cands
     if not ditemukan:
-        return ""
+        return None, ""
     if any(di_kota(c) for cands in ditemukan.values() for c in cands):
-        return ""
+        return None, ""
     teks, cands = max(ditemukan.items(), key=lambda kv: len(kv[0]))
-    return (f"Alamat dan kota tidak sesuai (diduga): kecamatan {teks} tidak ada di {kota}"
-            f" (ada di {', '.join(sorted(cands)[:3])}{' ...' if len(cands) > 3 else ''})")
+    return None, f"Alamat dan kota tidak sesuai (diduga): kecamatan {teks} tidak ada di {kota} (ada di {daftar(cands)})"
 
 
 # CHANNEL OUTLET -> SEGMENT. Hanya channel yang pasti; selain itu tidak dikonversi (segmen diisi manual).
@@ -412,8 +470,10 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None):
                     if kab:
                         kn = kanonik_kota(kab, pedoman)
                         cat, k = f"Kota ditentukan dari kecamatan di alamat ({k} -> {kn})", kn
-                if not cat and not kamus:   # kecamatan di alamat harus ada di kota itu (hanya catatan); kota hasil kamus dikecualikan
-                    cat = periksa_kecamatan_kota_pusat(a, k, kec_idx)
+                if not cat and not kamus:   # kecamatan di alamat harus ada di kota itu; kota hasil kamus dikecualikan
+                    kn2, cat = periksa_kecamatan_kota_pusat(a, k, kec_idx, pedoman)
+                    if kn2:
+                        k = kn2   # dikoreksi otomatis; catatan tetap ditulis agar user memeriksa
             kota_n.append(k)
             cat_n.append(cat)
         df["KOTA_BARU"] = pd.Series(kota_n, index=df.index, dtype=object)
