@@ -3636,9 +3636,9 @@ def page_riwayat_id(st):
         else:
             n_ganti = int(kosong["KETERANGAN"].str.startswith("ID lama").sum())
             st.write(f"**{len(kosong):,} ID_STR_OUTLET kosong**, {n_ganti:,} di antaranya karena ID-nya pernah diganti.")
-            st.caption("ID kosong = ID_STR_OUTLET yang nomor urutnya berada di bawah nomor tertinggi pada kelompok segmen dan kota yang sama, "
-                       "tetapi tidak dipakai outlet mana pun. Penyebab selain ID diganti belum diketahui, mis. data dihapus atau penomoran "
-                       "bawaan master awal. ID baru selalu memakai nomor setelah yang tertinggi dan tidak mengisi ID yang kosong.")
+            # st.caption("ID kosong = ID_STR_OUTLET yang nomor urutnya berada di bawah nomor tertinggi pada kelompok segmen dan kota yang sama, "
+            #            "tetapi tidak dipakai outlet mana pun. Penyebab selain ID diganti belum diketahui, mis. data dihapus atau penomoran "
+            #            "bawaan master awal. ID baru selalu memakai nomor setelah yang tertinggi dan tidak mengisi ID yang kosong.")
             st.dataframe(kosong, hide_index=True, width="stretch")
             st.download_button("Unduh (CSV)", kosong.to_csv(index=False).encode("utf-8-sig"), "id_str_outlet_kosong.csv", "text/csv")
     with t3:
@@ -3647,9 +3647,9 @@ def page_riwayat_id(st):
             st.success("Semua ID_STR_OUTLET sesuai dengan kota dan segmen master saat ini (atau pedoman belum diunggah).")
         else:
             st.write(f"**{len(sal):,} outlet** punya ID_STR_OUTLET yang kode segmen/kotanya berbeda dari kota + segmen saat ini.")
-            st.caption("Biasanya karena kota atau segmen master diubah tanpa mengganti ID. Termasuk perubahan dari masa sebelum riwayat ID dicatat. "
-               "ID_STR_SEHARUSNYA memakai kode yang sesuai kota + segmen saat ini dan nomor urut berikutnya setelah nomor tertinggi; "
-               "nomor pastinya ditetapkan saat ID benar-benar diganti.")
+            # st.caption("Biasanya karena kota atau segmen master diubah tanpa mengganti ID. Termasuk perubahan dari masa sebelum riwayat ID dicatat. "
+            #    "ID_STR_SEHARUSNYA memakai kode yang sesuai kota + segmen saat ini dan nomor urut berikutnya setelah nomor tertinggi; "
+            #    "nomor pastinya ditetapkan saat ID benar-benar diganti.")
             st.dataframe(sal, hide_index=True, width="stretch")
             st.download_button("Unduh (CSV)", sal.to_csv(index=False).encode("utf-8-sig"), "id_tidak_sesuai.csv", "text/csv")
 
