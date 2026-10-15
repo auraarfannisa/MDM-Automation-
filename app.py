@@ -864,12 +864,13 @@ def cocokkan_cust(df_new, df_lama, cfg, keputusan, cache=None):
             "BARIS_EXCEL": row["BARIS_EXCEL"], "JENIS_MATCH": jenis_match, "MATCH_PADA": via,
             "CUST_ID_BARU": row[kb["cust_id"]], "DISTRIBUTOR_BARU": d_raw if kb.get("distributor") else "",
             "PNAMLANG_ASAL": row.get("PNAMLANG_ASAL"), "PNAMLANG_BARU": row["PNAMLANG_AKHIR"], "ALAMAT_BARU": alamat_b,
-            "KOTA_BARU": row.get("KOTA_BARU"),
+            "KOTA_BARU": row.get("KOTA_BARU"), "SEGMENT_BARU": row.get("SEGMENT_BARU"),
             "ID_STR_OUTLET_MASTER": id_m,
             "CUST_ID_MASTER": df_lama.at[mi, km["cust_id"]],
             "DISTRIBUTOR_MASTER": df_lama.at[mi, km["distributor"]] if km.get("distributor") else "",
             "PNAMLANG_MASTER": nama_m.at[mi], "ALAMAT_MASTER": alamat_m.at[mi] if alamat_m is not None else None,
             "KOTA_MASTER": df_lama.at[mi, "KOTA_BARU"] if "KOTA_BARU" in df_lama.columns else None,
+            "SEGMENT_MASTER": df_lama.at[mi, "SEGMENT_BARU"] if "SEGMENT_BARU" in df_lama.columns else None,
             "JML_ROW_ID_STR_MASTER": len(baris_id), "CUST_ID_DI_ID_STR": ", ".join(lain[:8]) + (" ..." if len(lain) > 8 else ""),
             "JML_KANDIDAT": len(cand),
             "SKOR_NAMA": None if sn is None else round(sn, 2), "SKOR_ALAMAT": None if sa is None else round(sa, 2),
@@ -956,7 +957,7 @@ def prefix_dari_id(i):
 def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallback_prefix="1.10.31",
             sheet_baru="Data_Baru", sheet_match=None, lewati_duplikat=True,
             cust_cfg=None, keputusan_manual=None, pedoman=None, kota_override=None, nama_override=None, master_nama_override=None,
-            cache=None, df_bersih=None, ganti_id=False):
+            cache=None, df_bersih=None, ganti_id=False, segmen_override=None):
     log = []
     id_berubah, id_tetap = [], []
 
@@ -1010,13 +1011,19 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
     # --- B. Calon ID baru + sorting ---
     # df_bersih = hasil cleansing tahap 1 (sudah diperiksa/diedit pengguna); tanpa itu, cleansing dijalankan di sini
     df_murni = df_bersih.copy() if df_bersih is not None else clean_dataframe_baru(df_murni, pedoman)
-    # Kota yang dipilih user (dropdown pedoman di tab Keputusan cust_id): nama akhir dibangun ulang mengikuti kota
+    # Kota/segmen yang dipilih user di tab Penetapan ID Outlet: nama akhir dibangun ulang mengikuti kota dan segmen
+    df_murni["SEGMENT_BARU"] = df_murni["SEGMENT_BARU"].astype(object)
     for ix_, b_ in zip(df_murni.index, df_murni["BARIS_EXCEL"]):
         k_ = (kota_override or {}).get(b_)
-        if k_:
-            df_murni.at[ix_, "KOTA_BARU"] = k_
+        sg_ = (segmen_override or {}).get(b_)
+        if k_ or sg_:
+            if k_:
+                df_murni.at[ix_, "KOTA_BARU"] = k_
+            if sg_:
+                df_murni.at[ix_, "SEGMENT_BARU"] = sg_
             df_murni.at[ix_, "PNAMLANG_AKHIR"] = bangun_nama(
-                df_murni.at[ix_, "_NAMA_DASAR"], k_, df_murni.at[ix_, "SEGMENT_BARU"], df_murni.at[ix_, "_SUFIKS"])
+                df_murni.at[ix_, "_NAMA_DASAR"], df_murni.at[ix_, "KOTA_BARU"], df_murni.at[ix_, "SEGMENT_BARU"],
+                df_murni.at[ix_, "_SUFIKS"])
         n_ = (nama_override or {}).get(b_)   # nama yang diedit user di tab Keputusan cust_id menang atas hasil cleansing
         if n_:
             df_murni.at[ix_, "PNAMLANG_AKHIR"] = n_
@@ -1110,7 +1117,7 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
                         df_lama.loc[sama_id, "SEGMENT_BARU"] = seg_b
                     if pref_baru is not None and pref_baru != pref_kini:
                         id_tetap.append({**rec_id, "ID_STR_OUTLET": id_m,
-                                         "ALASAN": f"ID tidak diganti (opsi ganti ID mati); prefix sesuai data baru: {pref_baru}, prefix ID sekarang: {pref_kini}"})
+                                         "ALASAN": f"ID tidak diganti (opsi ganti ID mati); kode ID sesuai data baru: {pref_baru}, kode ID sekarang: {pref_kini}"})
                     elif seg_beda and not ganti_id:
                         id_tetap.append({**rec_id, "ID_STR_OUTLET": id_m,
                                          "ALASAN": "Segmen di data baru berbeda; segmen master tidak diubah (opsi ganti ID mati)"})
@@ -1738,41 +1745,64 @@ def pilih_detail(ed_detail, lama):
     return baru[-1] if baru else on[-1]
 
 
-def aksi_id_cust(aksi, id_rv, id_master):
-    """ID_STR_OUTLET_BARU untuk baris cust_id: BARU -> ID baru dari rv; GABUNG -> ID outlet master; lainnya kosong."""
+def aksi_id_cust(aksi, id_rv, id_master, id_ganti=None):
+    """ID_STR_OUTLET_BARU untuk baris cust_id: BARU -> ID baru dari rv; GABUNG ROW -> ID outlet master;
+    PERBARUI NAMA MASTER -> ID master terbaru (ID hasil penggantian bila segmen/kota berubah, selain itu ID master saat ini); lainnya kosong."""
     if aksi == "BARU":
         return _t(id_rv)
-    if aksi in ("GABUNG_LAMA", "TIMPA_GABUNG"):
+    if aksi in ("TIMPA", "TIMPA_GABUNG"):
+        return _t(id_ganti) or _t(id_master)
+    if aksi == "GABUNG_LAMA":
         return _t(id_master)
     return ""
 
 
-def tabel_cust_editor(cmatch, rv, jenis, opsi_label, pilih=None):
+def info_id_cust(res):
+    """{BARIS_EXCEL: (ID master hasil penggantian atau '', catatan)} untuk keputusan PERBARUI NAMA MASTER yang kota/segmennya berubah."""
+    out = {}
+    idt, idb = res.get("id_tetap"), res.get("id_berubah")
+    if idt is not None and len(idt):
+        for r in idt.to_dict("records"):
+            out[r["BARIS_EXCEL"]] = ("", _t(r.get("ALASAN")))
+    if idb is not None and len(idb):
+        for r in idb.to_dict("records"):
+            out[r["BARIS_EXCEL"]] = (_t(r.get("ID_BARU")),
+                                     f"ID_STR_OUTLET master berganti {_t(r.get('ID_LAMA'))} -> {_t(r.get('ID_BARU'))} ({_t(r.get('SEBAB'))})")
+    return out
+
+
+def tabel_cust_editor(cmatch, rv, jenis, opsi_label, pilih=None, info_id=None):
     """Tabel editor keputusan cust_id (indeks = BARIS_EXCEL). Baris yang sudah jadi calon ID baru memakai nilai terkini di rv,
     sehingga edit di tab Review dan di sini saling mengikuti."""
     d = cmatch[cmatch["JENIS_MATCH"] == jenis]
     rvx = rv.drop_duplicates("BARIS_EXCEL").set_index("BARIS_EXCEL") if len(rv) else rv.set_index("BARIS_EXCEL")
-    baris, kep, idb, nama, kota = [], [], [], [], []
+    info_id = info_id or {}
+    baris, kep, idb, nama, kota, seg, cat = [], [], [], [], [], [], []
     for _, r in d.iterrows():
         b, a = r["BARIS_EXCEL"], r["AKSI"]
         a = None if a is None or pd.isna(a) else a
         in_rv = a == "BARU" and b in rvx.index
         kep.append(LABEL_AKSI[a] if a in LABEL_AKSI and LABEL_AKSI[a] in opsi_label else opsi_label[0])
-        idb.append(aksi_id_cust(a, rvx.at[b, "ID_STR_OUTLET"] if in_rv else "", r["ID_STR_OUTLET_MASTER"]))
+        id_ganti, cat_id = info_id.get(b, ("", "")) if a in ("TIMPA", "TIMPA_GABUNG") else ("", "")
+        idb.append(aksi_id_cust(a, rvx.at[b, "ID_STR_OUTLET"] if in_rv else "", r["ID_STR_OUTLET_MASTER"], id_ganti))
+        cat.append("; ".join(x for x in (_t(r["SARAN"]), cat_id) if x))
         nama.append(_t(rvx.at[b, "PNAMLANG_AKHIR"]) if in_rv else _t(r["PNAMLANG_BARU"]))
         kota.append(_t(rvx.at[b, "KOTA_BARU"]) if in_rv else _t(r["KOTA_BARU"]))
+        seg.append(_t(rvx.at[b, "SEGMENT_BARU"]) if in_rv else _t(r["SEGMENT_BARU"]))
         baris.append(b)
     t = pd.DataFrame({
         "DETAIL": [pilih is not None and b == pilih for b in baris],
         "KEPUTUSAN": kep,
-        "CATATAN_CEK": [_t(x) for x in d["SARAN"]],
+        "CATATAN_CEK": cat,
         "ID_STR_OUTLET_BARU": idb,
         "PNAMLANG_BARU": nama,
         "ALAMAT_BARU": [_t(x) for x in d["ALAMAT_BARU"]],
         "KOTA_BARU": kota,
+        "SEGMENT_BARU": seg,
         "PNAMLANG_MASTER": [_t(x) for x in d["PNAMLANG_MASTER"]],
         "ALAMAT_MASTER": [_t(x) for x in d["ALAMAT_MASTER"]],
         "KOTA_MASTER": [_t(x) for x in d["KOTA_MASTER"]],
+        "SEGMENT_MASTER": [_t(x) for x in d["SEGMENT_MASTER"]],
         "ID_STR_OUTLET_MASTER": [_t(x) for x in d["ID_STR_OUTLET_MASTER"]],
         "CUST_ID_BARU": [_t(x) for x in d["CUST_ID_BARU"]],
         "CUST_ID_MASTER": [_t(x) for x in d["CUST_ID_MASTER"]],
@@ -1785,22 +1815,22 @@ def tabel_cust_editor(cmatch, rv, jenis, opsi_label, pilih=None):
 
 def selisih_cust(t0, ed):
     """Bandingkan tabel cust sebelum/sesudah diedit. Kembalikan dict baris -> {kolom: nilai baru} untuk
-    KEPUTUSAN / PNAMLANG_BARU / KOTA_BARU / PNAMLANG_MASTER yang berubah."""
+    KEPUTUSAN / PNAMLANG_BARU / KOTA_BARU / SEGMENT_BARU / PNAMLANG_MASTER yang berubah."""
     out = {}
     for b in ed.index:
         if b not in t0.index:
             continue
-        ch = {c: _t(ed.at[b, c]).strip() for c in ("KEPUTUSAN", "PNAMLANG_BARU", "KOTA_BARU", "PNAMLANG_MASTER")
+        ch = {c: _t(ed.at[b, c]).strip() for c in ("KEPUTUSAN", "PNAMLANG_BARU", "KOTA_BARU", "SEGMENT_BARU", "PNAMLANG_MASTER")
               if _t(ed.at[b, c]).strip() != _t(t0.at[b, c]).strip()}
         if ch:
             out[b] = ch
     return out
 
 
-def terapkan_selisih_overrides(selisih, keputusan, ko, no, pm, label_ke_aksi=None):
-    """Ubah dict keputusan/override dari selisih tabel cust. Mengembalikan salinan baru (dec, ko, no, pm)."""
+def terapkan_selisih_overrides(selisih, keputusan, ko, no, pm, label_ke_aksi=None, so=None):
+    """Ubah dict keputusan/override dari selisih tabel cust. Mengembalikan salinan baru (dec, ko, no, pm, so)."""
     label_ke_aksi = label_ke_aksi or AKSI_DARI_LABEL
-    dec, ko, no, pm = dict(keputusan), dict(ko), dict(no), dict(pm)
+    dec, ko, no, pm, so = dict(keputusan), dict(ko), dict(no), dict(pm), dict(so or {})
     for b, ch in selisih.items():
         if "KEPUTUSAN" in ch:
             a = label_ke_aksi.get(ch["KEPUTUSAN"])
@@ -1815,6 +1845,13 @@ def terapkan_selisih_overrides(selisih, keputusan, ko, no, pm, label_ke_aksi=Non
                 ko.pop(b, None)
             if "PNAMLANG_BARU" not in ch:
                 no.pop(b, None)          # hanya kota yang diganti: nama dibangun ulang mengikuti kota
+        if "SEGMENT_BARU" in ch:
+            if ch["SEGMENT_BARU"]:
+                so[b] = ch["SEGMENT_BARU"]
+            else:
+                so.pop(b, None)
+            if "PNAMLANG_BARU" not in ch:
+                no.pop(b, None)          # hanya segmen yang diganti: nama dibangun ulang mengikuti segmen
         if "PNAMLANG_BARU" in ch:
             if ch["PNAMLANG_BARU"]:
                 no[b] = ch["PNAMLANG_BARU"]
@@ -1822,7 +1859,7 @@ def terapkan_selisih_overrides(selisih, keputusan, ko, no, pm, label_ke_aksi=Non
                 no.pop(b, None)
         if "PNAMLANG_MASTER" in ch and ch["PNAMLANG_MASTER"]:
             pm[b] = ch["PNAMLANG_MASTER"]
-    return dec, ko, no, pm
+    return dec, ko, no, pm, so
 
 
 # ==============================================================================
@@ -2422,19 +2459,25 @@ def _jalankan(st, keputusan, pertahankan=False):
                   a["sheet_baru"], a["sheet_match"], a["lewati"], a["cust_cfg"], keputusan, pedoman=pedoman,
                   kota_override=st.session_state.get("kota_override", {}), nama_override=st.session_state.get("nama_override", {}),
                   master_nama_override=st.session_state.get("master_nama_override", {}), cache=c["mdm"],
-                  df_bersih=a.get("df_bersih"), ganti_id=bool(st.session_state.get("ganti_id_aktif", False)))
+                  df_bersih=a.get("df_bersih"), ganti_id=bool(st.session_state.get("ganti_id_aktif", False)),
+                  segmen_override=st.session_state.get("segmen_override", {}))
     rv = siapkan_rv(res["calon"], res, pedoman, known)
     lama = st.session_state.get("rv")
     if pertahankan and lama is not None and len(rv):  # edit & centang yang sudah dibuat tidak hilang
         pl = lama.drop_duplicates("BARIS_EXCEL").set_index("BARIS_EXCEL")
         ko_, no_ = st.session_state.get("kota_override", {}), st.session_state.get("nama_override", {})
+        so_ = st.session_state.get("segmen_override", {})
         for i, b in zip(rv.index, rv["BARIS_EXCEL"]):
             if b in pl.index:
-                # baris yang kota/namanya diubah di tab Keputusan cust_id: mengikuti pilihan itu, bukan edit lama di Review
+                # baris yang kota/segmen/namanya diubah di tab Penetapan ID Outlet: mengikuti pilihan itu, bukan edit lama di Review
                 for c in ("KOTA_BARU", "PNAMLANG_AKHIR", "SEGMENT_BARU", "SETUJU", "BUANG", "GABUNG"):
-                    if (c == "KOTA_BARU" and b in ko_) or (c == "PNAMLANG_AKHIR" and (b in ko_ or b in no_)):
+                    if ((c == "KOTA_BARU" and b in ko_) or (c == "SEGMENT_BARU" and b in so_)
+                            or (c == "PNAMLANG_AKHIR" and (b in ko_ or b in no_ or b in so_))):
                         continue
                     rv.at[i, c] = pl.at[b, c]
+                if (b in ko_ or b in so_) and b not in no_:   # nama ikut kota/segmen terbaru (termasuk edit di tab Review)
+                    rv.at[i, "PNAMLANG_AKHIR"] = bangun_nama(rv.at[i, "_NAMA_DASAR"], rv.at[i, "KOTA_BARU"],
+                                                              rv.at[i, "SEGMENT_BARU"], rv.at[i, "_SUFIKS"] if "_SUFIKS" in rv.columns else None)
         rv = beri_id(rv, res["max_seq"], res["prefix_map"], pedoman, known)
     st.session_state.update(res=res, rv=rv, rv_ver=st.session_state.get("rv_ver", 0) + 1,
                             pedoman=pedoman, known=known, keputusan=dict(keputusan))
@@ -2445,6 +2488,7 @@ def _jalankan(st, keputusan, pertahankan=False):
         st.session_state["draft_nama"] = {}
         st.session_state["kota_override"] = {}
         st.session_state["nama_override"] = {}
+        st.session_state["segmen_override"] = {}
         st.session_state["draft_master"] = {}
         st.session_state["master_nama_override"] = {}
     st.session_state.pop("xlsx", None)
@@ -2743,7 +2787,7 @@ def page_update(st):
                     ss["run_args"] = dict(timpa=timpa, fallback=fallback, sheet_baru=sheet_baru, lewati=lewati,
                                           sheet_match=None, cust_cfg=cust_cfg)
                     ss.pop("ganti_id", None)
-                    ss.update(ganti_id_aktif=False)
+                    ss.update(ganti_id_aktif=True)   # PERBARUI NAMA MASTER: ID_STR_OUTLET master mengikuti segmen/kota terbaru
                     ss.update(cl=cl, cl_ver=0, cl_run=ss.get("cl_run", 0) + 1, kol_cl=kol_cl, n_cust_cocok=n_cust, kec_ada=bool(c["kec"]), tahap=1, res=None, rv=None,
                               pedoman=c["pedoman"], known=c["known"], fname=nama_file_master(),
                               base_ver=last[0] if last else 0, hash=h, nama_file=f_baru.name, saved=False,
@@ -2801,12 +2845,13 @@ PETUNJUK_CUST = """**Keterangan warna**
 - **KEPUTUSAN**: tentukan tindakan untuk setiap data.
 - **PNAMLANG_BARU**: ubah nama outlet jika diperlukan.
 - **KOTA_BARU**: perbaiki kota outlet jika diperlukan.
+- **SEGMENT_BARU**: perbaiki segmen outlet jika diperlukan (mis. outlet naik dari klinik ke RS). **PNAMLANG_BARU** otomatis mengikuti segmen dan kota yang dipilih, kecuali nama diedit langsung.
 - **PNAMLANG_MASTER**: ubah nama outlet pada data master jika diperlukan.
 
 **Pilihan keputusan**
 - **ID BARU**: digunakan jika data merupakan outlet yang berbeda. Sistem akan membuat ID outlet baru.
 - **GABUNG ROW**: digunakan jika data merupakan outlet yang sama, tetapi perlu dicatat sebagai baris baru pada master. ID outlet yang sudah ada tetap digunakan.
-- **PERBARUI NAMA MASTER**: digunakan untuk memperbarui nama outlet pada master. Perubahan nama akan diterapkan pada seluruh baris yang memiliki ID outlet yang sama.
+- **PERBARUI NAMA MASTER**: digunakan untuk memperbarui nama outlet pada master. Perubahan nama akan diterapkan pada seluruh baris yang memiliki ID outlet yang sama. Jika segmen atau kota berubah dan opsi ganti ID aktif, ID_STR_OUTLET master ikut diganti mengikuti segmen/kota terbaru dan hasilnya tampil di kolom **ID_STR_OUTLET_BARU**.
 
 **Ketentuan pemrosesan**
 - Kolom **ID_STR_OUTLET_BARU** terisi otomatis setelah keputusan dipilih, sesuai dengan jenis keputusan.
@@ -3190,12 +3235,13 @@ def terapkan_selisih_cust(st, rv, res, selisih):
     """Terapkan selisih tabel cust. Perubahan keputusan, atau edit nama/kota baris yang bukan calon ID baru, menjalankan ulang
     pencocokan. Edit nama/kota pada calon ID baru yang sudah ada di rv cukup memperbarui rv (cepat). Selalu diakhiri _rerun(st)."""
     ss = st.session_state
-    dec, ko, no, pm = terapkan_selisih_overrides(selisih, ss.get("keputusan", {}), ss.get("kota_override", {}),
-                                                 ss.get("nama_override", {}), ss.get("master_nama_override", {}))
+    dec, ko, no, pm, so = terapkan_selisih_overrides(selisih, ss.get("keputusan", {}), ss.get("kota_override", {}),
+                                                     ss.get("nama_override", {}), ss.get("master_nama_override", {}),
+                                                     so=ss.get("segmen_override", {}))
     ada_rv = set(rv["BARIS_EXCEL"])
     penuh = any(("KEPUTUSAN" in ch) or ("PNAMLANG_MASTER" in ch) or (b not in ada_rv) for b, ch in selisih.items())
     if penuh:
-        ss["kota_override"], ss["nama_override"], ss["master_nama_override"] = ko, no, pm
+        ss["kota_override"], ss["nama_override"], ss["master_nama_override"], ss["segmen_override"] = ko, no, pm, so
         with st.spinner("Memproses ulang..."):
             _jalankan(st, dec, pertahankan=True)
     else:
@@ -3204,6 +3250,8 @@ def terapkan_selisih_cust(st, rv, res, selisih):
         for b, ch in selisih.items():
             if "KOTA_BARU" in ch:
                 sub.at[idx[b], "KOTA_BARU"] = ch["KOTA_BARU"] or None
+            if "SEGMENT_BARU" in ch:
+                sub.at[idx[b], "SEGMENT_BARU"] = ch["SEGMENT_BARU"] or None
             if "PNAMLANG_BARU" in ch:
                 sub.at[idx[b], "PNAMLANG_AKHIR"] = ch["PNAMLANG_BARU"]
         ss["rv"] = terapkan_edit(rv, sub, res["max_seq"], res["prefix_map"], ss.get("pedoman"), ss.get("known"))
@@ -3233,11 +3281,11 @@ def ui_tab_cust(st, res, rv, opsi_kota):
     c3.metric("Sudah diputuskan", len(cmatch) - n_belum)
     c4.metric("Belum diputuskan", n_belum)
 
-    st.checkbox("Ikut ganti ID_STR_OUTLET master bila kota atau segmen berubah (khusus keputusan PERBARUI NAMA MASTER)",
-                key="ganti_id", disabled=saved,
-                help="Mati (bawaan): kota master ikut diperbarui tetapi ID_STR_OUTLET dan segmen master tetap. Aktif: segmen dan kota master "
-                     "diperbarui, lalu ID_STR_OUTLET dibuat ulang dengan prefix (segmen.provinsi.kab/kota) yang sesuai dan nomor urut berikutnya "
-                     "di prefix itu. Semua baris master ber-ID sama ikut berganti. Riwayat ID dicatat saat disimpan.")
+    st.checkbox("ID_STR_OUTLET master ikut diganti bila segmen atau kota berubah (khusus keputusan PERBARUI NAMA MASTER)",
+                value=True, key="ganti_id", disabled=saved,
+                help="Aktif (bawaan): segmen dan kota master diperbarui, lalu ID_STR_OUTLET dibuat ulang mengikuti segmen dan kota terbaru "
+                     "dengan nomor urut berikutnya (mis. outlet naik dari klinik ke RS). Semua baris master ber-ID sama ikut berganti. "
+                     "Riwayat ID dicatat saat disimpan. Mati: kota master ikut diperbarui, tetapi ID_STR_OUTLET dan segmen master tetap.")
     if not saved and bool(ss.get("ganti_id", False)) != bool(ss.get("ganti_id_aktif", False)):
         ss["ganti_id_aktif"] = bool(ss.get("ganti_id", False))
         with st.spinner("Memproses ulang..."):
@@ -3248,11 +3296,12 @@ def ui_tab_cust(st, res, rv, opsi_kota):
     pilih = ss.get("cust_pilih")
     if pilih not in set(cmatch["BARIS_EXCEL"]):
         pilih = None
-    boleh = {"DETAIL", "KEPUTUSAN", "PNAMLANG_BARU", "KOTA_BARU", "PNAMLANG_MASTER"}
+    boleh = {"DETAIL", "KEPUTUSAN", "PNAMLANG_BARU", "KOTA_BARU", "SEGMENT_BARU", "PNAMLANG_MASTER"}
+    info_id = info_id_cust(res)
     semua_t0, semua_ed, opsi_per_baris = [], [], {}
     for jenis, judul, ket, opsi in BAGIAN_CUST:
         opsi_label = [LABEL_CUST_BELUM] + [LABEL_AKSI[o] for o in opsi]
-        t_full = tabel_cust_editor(cmatch, rv, jenis, opsi_label, pilih)
+        t_full = tabel_cust_editor(cmatch, rv, jenis, opsi_label, pilih, info_id)
         t_full.insert(0, "NO.", list(range(1, len(t_full) + 1)))
         for b in t_full.index:
             opsi_per_baris[b] = opsi_label
@@ -3264,6 +3313,7 @@ def ui_tab_cust(st, res, rv, opsi_kota):
             continue
         t0 = t0.copy()
         t0["KOTA_BARU"] = t0["KOTA_BARU"].map(lambda v: v if _t(v) else None).astype(object)
+        t0["SEGMENT_BARU"] = t0["SEGMENT_BARU"].map(lambda v: v if _t(v) else None).astype(object)
         opsi_k = opsi_kota(t0["KOTA_BARU"].dropna())
         if opsi_k:
             col_kota = st.column_config.SelectboxColumn(LABEL_BARU + "KOTA_BARU (pilih)", options=opsi_k,
@@ -3275,7 +3325,10 @@ def ui_tab_cust(st, res, rv, opsi_kota):
             "NO.": kolom_no(st),
             "KEPUTUSAN": st.column_config.SelectboxColumn("KEPUTUSAN", options=opsi_label, required=True, pinned=True),
             "CATATAN_CEK": st.column_config.TextColumn("CATATAN PEMERIKSAAN"),
-            "ID_STR_OUTLET_BARU": st.column_config.TextColumn("ID_STR_OUTLET_BARU", help="Terisi setelah keputusan ID BARU / GABUNG ROW."),
+            "ID_STR_OUTLET_BARU": st.column_config.TextColumn(
+                "ID_STR_OUTLET_BARU", help="Terisi setelah keputusan ID BARU / GABUNG ROW / PERBARUI NAMA MASTER."),
+            "SEGMENT_BARU": col_segment(st, opsi_segment(t0["SEGMENT_BARU"].dropna()), LABEL_BARU + "SEGMENT_BARU (pilih)"),
+            "SEGMENT_MASTER": st.column_config.TextColumn(LABEL_LAMA + "SEGMENT_MASTER"),
             "PNAMLANG_BARU": st.column_config.TextColumn(LABEL_BARU + "PNAMLANG_BARU (edit)"),
             "ALAMAT_BARU": st.column_config.TextColumn(LABEL_BARU + "ALAMAT_BARU"),
             "KOTA_BARU": col_kota,
@@ -3322,7 +3375,7 @@ def panel_cust(st, res, rv, cmatch, b, t_row, opsi_label, opsi_kota, saved):
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f"{LABEL_BARU}Data baru")
-        st.text_input("ID_STR_OUTLET_BARU", value=_t(tr["ID_STR_OUTLET_BARU"]) or "(terisi setelah keputusan ID BARU / GABUNG ROW)",
+        st.text_input("ID_STR_OUTLET_BARU", value=_t(tr["ID_STR_OUTLET_BARU"]) or "(terisi setelah keputusan ID BARU / GABUNG ROW / PERBARUI NAMA MASTER)",
                       disabled=True, key=k + "_id")
         nama = st.text_input("PNAMLANG_BARU (edit)", value=_t(tr["PNAMLANG_BARU"]), key=k + "_n", disabled=saved)
         kota_now = _t(tr["KOTA_BARU"])
@@ -3332,6 +3385,10 @@ def panel_cust(st, res, rv, cmatch, b, t_row, opsi_label, opsi_kota, saved):
                                 key=k + "_k", disabled=saved) or ""
         else:
             kota = st.text_input("KOTA_BARU (edit)", value=kota_now, key=k + "_k", disabled=saved)
+        seg_now = _t(tr["SEGMENT_BARU"])
+        opsi_s = opsi_segment([], seg_now)
+        seg = st.selectbox("SEGMENT_BARU (pilih)", opsi_s, index=opsi_s.index(seg_now) if seg_now in opsi_s else None,
+                           key=k + "_s", disabled=saved) or ""
         kep = st.selectbox("KEPUTUSAN", opsi_label, index=opsi_label.index(tr["KEPUTUSAN"]), key=k + "_d", disabled=saved)
         info = [("PNAMLANG_ASAL", r.get("PNAMLANG_ASAL")), ("ALAMAT_BARU", r.get("ALAMAT_BARU")),
                 ("CUST_ID_BARU", r.get("CUST_ID_BARU")), ("DISTRIBUTOR_BARU", r.get("DISTRIBUTOR_BARU")),
@@ -3348,6 +3405,7 @@ def panel_cust(st, res, rv, cmatch, b, t_row, opsi_label, opsi_kota, saved):
         return
     ed1 = t_row.copy()
     ed1["PNAMLANG_BARU"], ed1["KOTA_BARU"], ed1["KEPUTUSAN"], ed1["PNAMLANG_MASTER"] = nama, kota, kep, nama_m
+    ed1["SEGMENT_BARU"] = seg
     selisih = selisih_cust(t_row, ed1)
     if selisih:
         terapkan_selisih_cust(st, rv, res, selisih)
