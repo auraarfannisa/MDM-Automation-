@@ -1047,6 +1047,7 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
     n_cust_elim = n_timpa = n_gabung = 0
     paksa_baru = set()
     df_gabung = pd.DataFrame()
+    master_cust_awal = pd.DataFrame()
     if cust_cfg:
         hc = cocokkan_cust(df_murni, df_lama, cust_cfg, keputusan_manual or {}, cache=cache)
         for t in hc["info"]:
@@ -1068,6 +1069,11 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
                 if str(x_["ID_STR_OUTLET_MASTER"]) == str(id_m_):
                     x_["PNAMLANG_MASTER"] = n_   # tampilan di menu ikut berubah
             L("EDIT NAMA MASTER", id_m_, f"{len(sama_)} baris ber-ID_STR sama: '{lama_}' -> '{n_}'", row=rb(b_))
+
+        # Cuplikan baris master yang dicocokkan, diambil SEBELUM nama/kota/segmen/ID-nya diperbarui. Dipakai preview di panel
+        # perbandingan agar data duplikat tetap tampil walaupun ID_STR_OUTLET master berganti (mis. klinik naik jadi RS).
+        id_cocok = {str(r_["ID_STR_OUTLET_MASTER"]) for r_ in hc["semua"]}
+        master_cust_awal = df_lama[df_lama["ID_STR_OUTLET"].astype(str).isin(id_cocok)].copy()
 
         for r in hc["eliminasi"]:
             L("CUST_ID SAMA (DIHAPUS)", r["ID_STR_OUTLET_MASTER"],
@@ -1254,6 +1260,7 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
         "log": pd.DataFrame(log),
         "cek_manual": cek_manual,
         "cust_match": cust_match,
+        "master_cust_awal": master_cust_awal,
         "gabung": df_gabung,
         "id_berubah": pd.DataFrame(id_berubah),
         "id_tetap": pd.DataFrame(id_tetap),
@@ -3396,10 +3403,15 @@ def panel_cust(st, res, rv, cmatch, b, t_row, opsi_label, opsi_kota, saved):
         st.dataframe(pd.DataFrame({"kolom": [a for a, _ in info], "nilai": [_t(v) for _, v in info]}),
                      hide_index=True, width="stretch")
     with c2:
-        st.markdown(f"{LABEL_LAMA}Data master {id_m} ({int(r['JML_ROW_ID_STR_MASTER'] or 0)} baris, diurutkan dari yang paling mirip)")
+        st.markdown(f"{LABEL_LAMA}Data master {id_m} ({int(r['JML_ROW_ID_STR_MASTER'] or 0)} baris, kondisi sebelum diperbarui, "
+                    "diurutkan dari yang paling mirip)")
+        id_ganti_, _ = info_id_cust(res).get(b, ("", ""))
+        if id_ganti_ and ss.get("ganti_id_aktif") and _s(tr["KEPUTUSAN"]) in ("PERBARUI NAMA MASTER", "PERBARUI NAMA MASTER + GABUNG ROW"):
+            st.caption(f"Setelah disimpan, ID_STR_OUTLET master ini berganti menjadi {id_ganti_}.")
         nama_m = st.text_input("PNAMLANG_MASTER (edit, berlaku ke semua baris ber-ID_STR ini)", value=_t(tr["PNAMLANG_MASTER"]),
                                key=k + "_m", disabled=saved)
-        st.dataframe(master_serupa(res["master_lama"], id_m, nama or tr["PNAMLANG_BARU"], r.get("ALAMAT_BARU")),
+        st.dataframe(master_serupa(res["master_cust_awal"] if len(res.get("master_cust_awal", [])) else res["master_lama"],
+                                   id_m, nama or tr["PNAMLANG_BARU"], r.get("ALAMAT_BARU")),
                      hide_index=True, width="stretch")
     if saved:
         return
@@ -3516,53 +3528,51 @@ def page_riwayat(st):
     st.caption("Backup & pemulihan data ditangani Neon (Dashboard > Restore / branch). Disarankan juga pg_dump berkala.")
 
 
-def ringkas_celah(angka):
-    """[3,4,5,9] -> '3-5, 9'"""
-    out, a = [], list(angka)
-    i = 0
-    while i < len(a):
-        j = i
-        while j + 1 < len(a) and a[j + 1] == a[j] + 1:
-            j += 1
-        out.append(str(a[i]) if i == j else f"{a[i]}-{a[j]}")
-        i = j + 1
-    return ", ".join(out)
-
-
-def hitung_celah_id(master, id_lama_set=()):
-    """Celah nomor urut ID_STR_OUTLET per prefix (1..maks yang tidak dipakai). id_lama_set: ID yang pernah diganti (penyebab celah)."""
+def daftar_id_kosong(master, id_lama_map=None):
+    """ID_STR_OUTLET lengkap yang kosong: nomor urut dari 1 sampai nomor tertinggi pada tiap kelompok (segmen.provinsi.kab/kota)
+    yang tidak dipakai outlet mana pun. id_lama_map: {ID lama: ID pengganti} dari riwayat ID yang berganti (penyebab kosong)."""
+    id_lama_map = id_lama_map or {}
     ids = master["ID_STR_OUTLET"].dropna().astype(str).drop_duplicates()
     p = ids.str.rsplit(".", n=1, expand=True)
     if p.shape[1] != 2:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["KODE_ID", "KETERANGAN"])
     ok = p[1].str.isdigit().fillna(False)
-    d = pd.DataFrame({"prefix": p.loc[ok, 0], "urut": p.loc[ok, 1].astype(int)})
+    d = pd.DataFrame({"kode": p.loc[ok, 0], "urut": p.loc[ok, 1].astype(int)})
     baris = []
-    for pref, g in d.groupby("prefix"):
+    for kode, g in d.groupby("kode", sort=True):
         ada = set(g["urut"])
-        mx = max(ada)
-        hilang = [n for n in range(1, mx + 1) if n not in ada]
-        if not hilang:
-            continue
-        pernah = [n for n in hilang if f"{pref}.{n}" in id_lama_set]
-        baris.append({"KODE_ID (tanpa nomor urut)": pref, "URUT_MAKS": mx, "JML_ID": len(ada), "JML_CELAH": len(hilang),
-                      "CELAH": ringkas_celah(hilang), "CELAH_KARENA_ID_DIGANTI": len(pernah),
-                      "CELAH_TANPA_RIWAYAT": len(hilang) - len(pernah)})
-    return pd.DataFrame(baris).sort_values("JML_CELAH", ascending=False) if baris else pd.DataFrame()
+        for n in range(1, max(ada) + 1):
+            if n in ada:
+                continue
+            id_ = f"{kode}.{n}"
+            baris.append({"KODE_ID": id_, "KETERANGAN": (f"ID lama, sudah diganti menjadi {id_lama_map[id_]}" if id_ in id_lama_map
+                                                          else "Tidak ada riwayat penggantian")})
+    return pd.DataFrame(baris, columns=["KODE_ID", "KETERANGAN"])
 
 
 def id_tidak_sesuai(master, pedoman):
-    """Baris master yang prefix ID-nya berbeda dari prefix hasil (SEGMENT_BARU, KOTA_BARU) saat ini: ID tidak mengikuti perubahan kota/segmen."""
+    """Baris master yang kode ID-nya (segmen.provinsi.kab/kota) berbeda dari hasil SEGMENT_BARU + KOTA_BARU saat ini: ID tidak mengikuti
+    perubahan kota/segmen. ID_STR_SEHARUSNYA = ID lengkap yang akan dipakai: kode yang sesuai + nomor urut berikutnya setelah nomor tertinggi."""
     if not pedoman or not {"ID_STR_OUTLET", "KOTA_BARU", "SEGMENT_BARU"} <= set(master.columns):
         return pd.DataFrame()
     d = master[["ID_STR_OUTLET", "KOTA_BARU", "SEGMENT_BARU"] + [c for c in ("PNAMLANG_AKHIR",) if c in master.columns]].dropna(
         subset=["ID_STR_OUTLET"]).drop_duplicates("ID_STR_OUTLET").copy()
-    d["KODE_ID_SEKARANG"] = d["ID_STR_OUTLET"].astype(str).map(prefix_dari_id)
+    d["_KODE_SKRG"] = d["ID_STR_OUTLET"].astype(str).map(prefix_dari_id)
     kombinasi = d[["KOTA_BARU", "SEGMENT_BARU"]].drop_duplicates()
     peta = {(k, sg): prefix_id(k, sg, pedoman) for k, sg in zip(kombinasi["KOTA_BARU"], kombinasi["SEGMENT_BARU"])}
-    d["KODE_ID_SEHARUSNYA"] = [peta.get((k, sg)) for k, sg in zip(d["KOTA_BARU"], d["SEGMENT_BARU"])]
-    d = d[d["KODE_ID_SEHARUSNYA"].notna() & d["KODE_ID_SEKARANG"].notna() & (d["KODE_ID_SEKARANG"] != d["KODE_ID_SEHARUSNYA"])]
-    return d.reset_index(drop=True)
+    d["_KODE_SEHARUSNYA"] = [peta.get((k, sg)) for k, sg in zip(d["KOTA_BARU"], d["SEGMENT_BARU"])]
+    d = d[d["_KODE_SEHARUSNYA"].notna() & d["_KODE_SKRG"].notna() & (d["_KODE_SKRG"] != d["_KODE_SEHARUSNYA"])]
+    if d.empty:
+        return d.drop(columns=["_KODE_SKRG", "_KODE_SEHARUSNYA"]).reset_index(drop=True)
+    max_seq, _ = peta_id(master)
+    d = d.assign(_urut=pd.to_numeric(d["ID_STR_OUTLET"].astype(str).str.rsplit(".", n=1).str[-1], errors="coerce")).sort_values(
+        ["_KODE_SEHARUSNYA", "_KODE_SKRG", "_urut"], kind="stable")
+    seq, ids = dict(max_seq), []
+    for kode in d["_KODE_SEHARUSNYA"]:
+        seq[kode] = seq.get(kode, 0) + 1
+        ids.append(f"{kode}.{seq[kode]}")
+    d["ID_STR_SEHARUSNYA"] = ids
+    return d.drop(columns=["_KODE_SKRG", "_KODE_SEHARUSNYA", "_urut"]).reset_index(drop=True)
 
 
 def load_riwayat_id():
@@ -3596,7 +3606,7 @@ def page_riwayat_id(st):
         st.info("Belum ada data.")
         return
     st.caption("Ringkasan semua perubahan ID_STR_OUTLET selama ini, bukan hanya dari data baru terakhir.")
-    t1, t2, t3 = st.tabs(["ID yang pernah berganti", "Celah urutan ID", "ID tidak sesuai kota/segmen"])
+    t1, t2, t3 = st.tabs(["Perubahan ID Outlet", "ID yang Kosong", "ID tidak sesuai kota/segmen"])
     with t1:
         ri = load_riwayat_id()
         st.markdown("**ID yang berganti karena kota/segmen berubah (tercatat di sistem)**")
@@ -3616,24 +3626,30 @@ def page_riwayat_id(st):
     master = master_cached(st)
     with t2:
         ri = load_riwayat_id()
-        lama = set(ri["id_lama"]) if len(ri) else set()
-        celah = hitung_celah_id(master, lama)
-        if celah.empty:
-            st.success("Tidak ada celah: nomor urut ID_STR_OUTLET berurutan tanpa lompatan untuk setiap kombinasi segmen dan kota.")
+        lama_map = {}
+        if len(ri):
+            for a_, b_ in zip(ri["id_lama"], ri["id_baru"]):   # riwayat terbaru di atas: yang pertama dipakai
+                lama_map.setdefault(a_, b_)
+        kosong = daftar_id_kosong(master, lama_map)
+        if kosong.empty:
+            st.success("Tidak ada ID yang kosong: nomor urut ID_STR_OUTLET berurutan tanpa lompatan untuk setiap kombinasi segmen dan kota.")
         else:
-            st.write(f"**{len(celah):,} kelompok ID_STR_OUTLET** (kombinasi segmen dan kota) punya nomor urut yang lompat, total **{int(celah['JML_CELAH'].sum()):,}** nomor kosong.")
-            st.caption("Celah = nomor dari 1 sampai nomor tertinggi yang tidak dipakai ID mana pun. Kolom CELAH_KARENA_ID_DIGANTI = nomor yang "
-                       "kosong karena ID-nya pernah diganti (tercatat). Sisanya (CELAH_TANPA_RIWAYAT) belum diketahui penyebabnya, mis. data "
-                       "dihapus atau penomoran bawaan master awal. ID baru selalu memakai nomor setelah yang tertinggi dan tidak mengisi celah.")
-            st.dataframe(celah, hide_index=True, width="stretch")
-            st.download_button("Unduh (CSV)", celah.to_csv(index=False).encode("utf-8-sig"), "celah_id_str_outlet.csv", "text/csv")
+            n_ganti = int(kosong["KETERANGAN"].str.startswith("ID lama").sum())
+            st.write(f"**{len(kosong):,} ID_STR_OUTLET kosong**, {n_ganti:,} di antaranya karena ID-nya pernah diganti.")
+            st.caption("ID kosong = ID_STR_OUTLET yang nomor urutnya berada di bawah nomor tertinggi pada kelompok segmen dan kota yang sama, "
+                       "tetapi tidak dipakai outlet mana pun. Penyebab selain ID diganti belum diketahui, mis. data dihapus atau penomoran "
+                       "bawaan master awal. ID baru selalu memakai nomor setelah yang tertinggi dan tidak mengisi ID yang kosong.")
+            st.dataframe(kosong, hide_index=True, width="stretch")
+            st.download_button("Unduh (CSV)", kosong.to_csv(index=False).encode("utf-8-sig"), "id_str_outlet_kosong.csv", "text/csv")
     with t3:
         sal = id_tidak_sesuai(master, load_pedoman())
         if sal.empty:
             st.success("Semua ID_STR_OUTLET sesuai dengan kota dan segmen master saat ini (atau pedoman belum diunggah).")
         else:
             st.write(f"**{len(sal):,} outlet** punya ID_STR_OUTLET yang kode segmen/kotanya berbeda dari kota + segmen saat ini.")
-            st.caption("Biasanya karena kota atau segmen master diubah tanpa mengganti ID. Termasuk perubahan dari masa sebelum riwayat ID dicatat.")
+            st.caption("Biasanya karena kota atau segmen master diubah tanpa mengganti ID. Termasuk perubahan dari masa sebelum riwayat ID dicatat. "
+               "ID_STR_SEHARUSNYA memakai kode yang sesuai kota + segmen saat ini dan nomor urut berikutnya setelah nomor tertinggi; "
+               "nomor pastinya ditetapkan saat ID benar-benar diganti.")
             st.dataframe(sal, hide_index=True, width="stretch")
             st.download_button("Unduh (CSV)", sal.to_csv(index=False).encode("utf-8-sig"), "id_tidak_sesuai.csv", "text/csv")
 
