@@ -2646,8 +2646,6 @@ def tampil_cleansing(st):
     if n_kt:
         st.warning(f"{n_kt} baris PNAMLANG_AKHIR masih kotor.")
     n_cek = int((t_full["CATATAN_CEK"] != "").sum())
-    st.caption("Periksa hasil cleansing. Kolom KOTA_BARU, PNAMLANG_AKHIR, dan SEGMENT_BARU dapat diedit; mengubah KOTA_BARU atau "
-               "SEGMENT_BARU otomatis memperbarui PNAMLANG_AKHIR. Pencocokan dan keputusan dilakukan pada tahap 2.")
     st.write(f"Baris dengan catatan pemeriksaan: **{n_cek:,}** dari {len(t_full):,}")
     hanya = st.checkbox("Tampilkan hanya data yang memerlukan pemeriksaan", value=False, key="hanya_cl")
     urut = st.checkbox("Urutkan berdasarkan prioritas pemeriksaan (kota diubah otomatis di atas)", value=True, key="urut_cl")
