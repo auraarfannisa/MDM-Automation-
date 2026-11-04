@@ -2598,12 +2598,39 @@ def _jalankan(st, keputusan, pertahankan=False):
     st.session_state.pop("xlsx", None)
 
 
+def buang_header_ganda_dan_kosong(d):
+    """Buang (a) baris yang seluruh selnya kosong dan (b) baris header yang berulang di tengah data
+    (baris yang isinya sama dengan nama kolom, mis. DISTRIBUTOR | KOCAB | NACABDIST | ...).
+    Kembalikan (df bersih, jumlah baris kosong dibuang, jumlah header ganda dibuang).
+    Nomor baris Excel asli dipertahankan lewat kolom BARIS_EXCEL (harus sudah ada sebelum fungsi ini dipanggil)."""
+    if d is None or not len(d):
+        return d, 0, 0
+    teks = d.drop(columns=["BARIS_EXCEL"], errors="ignore").fillna("").astype(str)
+    teks = teks.apply(lambda s: s.str.strip())
+
+    # (a) baris kosong: semua sel kosong
+    kosong = (teks == "").all(axis=1)
+
+    # (b) header ganda: banyak sel pada baris itu sama dengan nama kolom
+    nama_kolom = [re.sub(r"[^A-Z0-9]", "", str(c).upper()) for c in teks.columns if not str(c).startswith("Unnamed")]
+    nama_kolom = [c for c in nama_kolom if c]
+    batas = max(2, int(np.ceil(len(nama_kolom) * 0.5)))   # minimal separuh kolom cocok
+    norm = teks.apply(lambda s: s.str.upper().str.replace(r"[^A-Z0-9]", "", regex=True))
+    cocok = norm.isin(nama_kolom).sum(axis=1)
+    header = (cocok >= batas) & ~kosong
+
+    bersih = d[~(kosong | header)].reset_index(drop=True)
+    return bersih, int(kosong.sum()), int(header.sum())
+
+
 def siapkan_murni(sheets_baru, sheet_baru):
     """Sheet data baru + nomor baris Excel; validasi kolom nama & kota."""
     if sheet_baru not in sheets_baru:
         raise ValueError(f"Sheet data baru '{sheet_baru}' tidak ditemukan. Sheet tersedia: {list(sheets_baru)}")
     d = samakan_nama_kolom(sheets_baru[sheet_baru].copy())   # 'NAMA GROUP CHAIN' -> NAMA_GROUP_CHAIN, dst.
-    d["BARIS_EXCEL"] = d.index + 2  # perkiraan nomor baris di Excel (baris 1 = header)
+    d["BARIS_EXCEL"] = d.index + 2  # nomor baris Excel ASLI (baris 1 = header); dihitung SEBELUM baris dibuang
+    d, n_kosong, n_header = buang_header_ganda_dan_kosong(d)
+    d.attrs["info_bersih"] = (n_kosong, n_header)
     for kolom, kandidat in (("nama", ("PNAMLANG_CLEAN", "PNAMLANG")), ("kota", ("KOTA_CLEAN", "KOTA"))):
         if not any(c in d.columns for c in kandidat):
             raise ValueError(f"Sheet '{sheet_baru}' tidak memiliki kolom {kolom} ({' / '.join(kandidat)}). "
@@ -2738,6 +2765,9 @@ def tampil_cleansing(st):
     st.divider()
     st.subheader("Tahap 1: Hasil Cleansing")
     st.write(f"File: **{ss['nama_file']}** ({len(cl):,} baris)")
+    nk_, nh_ = ss.get("info_bersih", (0, 0))
+    if nk_ or nh_:
+        st.info(f"Dibersihkan otomatis sebelum cleansing: {nh_:,} baris header ganda dan {nk_:,} baris kosong dibuang.")
     if not pedoman:
         st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). Kota dan segmen tidak dapat divalidasi.")
     t_full = tabel_cleansing(cl, kol, pedoman)
@@ -2883,6 +2913,7 @@ def page_update(st):
                     ss = st.session_state
                     c = cache_db(st)
                     murni = siapkan_murni(sh_baru, sheet_baru)
+                    ss["info_bersih"] = murni.attrs.get("info_bersih", (0, 0))
                     kb = (cust_cfg or {}).get("kol_baru") or {}
                     cl = clean_dataframe_baru(murni, c["pedoman"], c["kec"], kb.get("alamat"), c.get("riw"), c.get("cust_kota"))
                     kol_cl = {k: (kb.get(k) or deteksi_kolom(cl, k)) for k in ("alamat", "distributor", "cust_id", "channel")}
