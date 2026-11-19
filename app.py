@@ -2948,13 +2948,15 @@ PETUNJUK_REVIEW = """**1. Periksa dan edit data**
 
 Data dengan nama outlet, kota, dan segmen yang sama dengan data master tersedia pada tab **Outlet yang Sudah Terdaftar di Master**. Periksa tab tersebut untuk memastikan apakah data merupakan outlet yang sudah terdaftar."""
 
-PETUNJUK_SAMA = """Data pada tab ini memiliki nama outlet, kota, dan segmen yang sama dengan data master, tetapi alamatnya berbeda.
+PETUNJUK_SAMA = """Data pada tab ini memiliki nama outlet, kota, dan segmen yang sama dengan outlet yang sudah terdaftar di master, tetapi **CUST_ID-nya berbeda** dari yang ada di master. Alamat bisa mirip atau berbeda (lihat kolom skor/alamat). Setiap baris wajib diputuskan.
 
 1. Centang **DETAIL** pada baris data untuk membandingkannya dengan data outlet yang sudah terdaftar di master.
 2. Tentukan keputusan berdasarkan hasil pemeriksaan:
-   * **ID BARU**: jika data tersebut merupakan outlet yang berbeda.
-   * **GABUNG KE MASTER**: jika data tersebut merupakan outlet yang sama. Data ditambahkan sebagai baris baru pada master dengan menggunakan ID outlet yang sudah ada.
-3. Pilih **Tampilkan hanya data yang belum diputuskan** untuk memfilter baris yang masih memerlukan keputusan."""
+   * **ID BARU**: jika data tersebut merupakan outlet yang berbeda. Sistem membuat ID_STR_OUTLET baru.
+   * **GABUNG KE MASTER**: jika data tersebut merupakan outlet yang sama. Tidak dibuat ID baru dan tidak ada outlet baru; data ditambahkan sebagai baris (row) baru pada master dengan ID_STR_OUTLET outlet yang sudah ada, sehingga CUST_ID baru (distributor/cabang lain) tercatat di bawah outlet tersebut. Nama, kota, dan segmen mengikuti outlet master.
+   * **HAPUS**: jika data tidak dipakai.
+3. Tombol **Gabung ke master semua** menerapkan GABUNG KE MASTER sekaligus ke seluruh baris di tab ini yang belum diputuskan (centang **Termasuk baris yang sudah diputuskan ID BARU** untuk menimpa keputusan ID BARU juga). Baris yang sudah HAPUS tidak ikut. Gunakan hanya setelah yakin semua baris di tab ini memang outlet yang sama; **Batalkan gabung semua** mengembalikannya ke belum diputuskan.
+4. Pilih **Tampilkan hanya data yang belum diputuskan** untuk memfilter baris yang masih memerlukan keputusan."""
 
 PETUNJUK_CUST = """**Keterangan warna**
 - 🟦 **Data Baru**: data outlet yang sedang diproses.
@@ -3299,6 +3301,34 @@ def tampil_hasil_update(st):
         m1.metric("ID BARU (outlet berbeda)", int((lab_s == KEP_BARU).sum()))
         m2.metric("Gabung ke master", int((lab_s == KEP_GABUNG).sum()))
         m3.metric("Belum diputuskan", int((lab_s == KEP_BELUM).sum()))
+        if not st.session_state.get("saved"):
+            sm_ = rv["ID_MASTER_SAMA"].fillna("").astype(str).str.strip() != ""
+            aktif_ = sm_ & ~rv["BUANG"].astype(bool)
+            timpa_ = st.checkbox("Termasuk baris yang sudah diputuskan ID BARU", value=False, key="gab_semua_timpa",
+                                 help="Bila dicentang, keputusan ID BARU pada baris di tab ini ikut diganti menjadi GABUNG KE MASTER.")
+            tgt_ = aktif_ & ~rv["GABUNG"].astype(bool) & (timpa_ | ~rv["SETUJU"].astype(bool))
+            ada_gab_ = aktif_ & rv["GABUNG"].astype(bool)
+            g1, g2, _ = st.columns([1, 1, 3])
+            if g1.button(f"Gabung ke master semua ({int(tgt_.sum())})", key="gabung_semua", disabled=not tgt_.any(),
+                         help="Semua baris di tab ini dianggap outlet yang sama dengan outlet master: tidak dibuat ID baru, "
+                              "ditambahkan sebagai row baru ber-ID_STR_OUTLET master (nama/kota/segmen mengikuti master). "
+                              "Periksa dulu perbandingannya; baris yang sudah HAPUS tidak ikut."):
+                ed_ = rv.loc[tgt_, ["KOTA_BARU", "SEGMENT_BARU", "PNAMLANG_AKHIR", "SETUJU", "BUANG", "GABUNG"]].copy()
+                ed_["BUANG"], ed_["GABUNG"], ed_["SETUJU"] = False, True, False
+                st.session_state["rv"] = terapkan_edit(rv, ed_, res["max_seq"], res["prefix_map"],
+                                                       st.session_state.get("pedoman"), st.session_state.get("known"))
+                st.session_state["rv_ver"] += 1
+                st.session_state.pop("xlsx", None)
+                _rerun(st)
+            if g2.button(f"Batalkan gabung semua ({int(ada_gab_.sum())})", key="batal_gabung_semua", disabled=not ada_gab_.any(),
+                         help="Mengembalikan baris yang berstatus GABUNG KE MASTER di tab ini menjadi belum diputuskan."):
+                ed_ = rv.loc[ada_gab_, ["KOTA_BARU", "SEGMENT_BARU", "PNAMLANG_AKHIR", "SETUJU", "BUANG", "GABUNG"]].copy()
+                ed_["BUANG"], ed_["GABUNG"], ed_["SETUJU"] = False, False, False
+                st.session_state["rv"] = terapkan_edit(rv, ed_, res["max_seq"], res["prefix_map"],
+                                                       st.session_state.get("pedoman"), st.session_state.get("known"))
+                st.session_state["rv_ver"] += 1
+                st.session_state.pop("xlsx", None)
+                _rerun(st)
         _tabel_sama()
 
     if tab == "cust":
