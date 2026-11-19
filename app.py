@@ -1052,7 +1052,7 @@ def prefix_dari_id(i):
 
 
 def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallback_prefix="1.10.31",
-            sheet_baru="Data_Baru", sheet_match=None, lewati_duplikat=True,
+            sheet_baru="Data_Baru", sheet_match=None,
             cust_cfg=None, keputusan_manual=None, pedoman=None, kota_override=None, nama_override=None, master_nama_override=None,
             cache=None, df_bersih=None, ganti_id=False, segmen_override=None):
     log = []
@@ -1255,7 +1255,6 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
         hapus = {r["BARIS_EXCEL"] for r in hc["eliminasi"] + hc["manual"] + hc["update"] + hc["gabung"]}
         df_murni = df_murni[~df_murni["BARIS_EXCEL"].isin(hapus)]
 
-    n_dup_lewat = 0
     if len(df_murni):
         df_murni = df_murni.copy()
         df_murni["_CATATAN_DUP"] = ""
@@ -1280,12 +1279,10 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
         cfg_ = cust_cfg or {}
         kol_ab = (cfg_.get("kol_baru") or {}).get("alamat") or deteksi_kolom(df_murni, "alamat")
         kol_am = (cfg_.get("kol_master") or {}).get("alamat") or deteksi_kolom(df_lama, "alamat")
-        amb_alamat = cfg_.get("ambang_alamat", 0.70)
         kol_cm = (cfg_.get("kol_master") or {}).get("cust_id") or deteksi_kolom(df_lama, "cust_id")
         pakai_alamat = bool(kol_ab and kol_am and kol_ab in df_murni.columns and kol_am in df_lama.columns)
         if not pakai_alamat:
             L("INFO", "", "Cek duplikat nama+kota+segmen tanpa alamat (kolom alamat tidak ditemukan di data baru/master).")
-        dup_list = []
         for ix_, k_, b_ in zip(df_murni.index, km, df_murni["BARIS_EXCEL"]):
             cand = peta_master.get(k_)
             if not cand:
@@ -1304,44 +1301,29 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
                 if sk:
                     skor, mi_best = max(sk, key=lambda t_: t_[0])
             id_m = df_lama.at[mi_best, "ID_STR_OUTLET"]
-            if skor is None or skor >= amb_alamat:
-                dup_list.append((ix_, id_m, skor))
-            else:
-                df_murni.at[ix_, "_CATATAN_DUP"] = (f"Nama+kota+segmen sama dengan outlet master {id_m} tetapi alamat berbeda "
-                                                    f"(skor {skor:.2f}); pastikan ini outlet lain. Jika ternyata outlet yang sama, "
-                                                    f"centang GABUNG (jadi row baru ber-ID {id_m})")
-                df_murni.at[ix_, "ID_MASTER_SAMA"] = id_m
-                df_murni.at[ix_, "ALAMAT_MASTER_SAMA"] = df_lama.at[mi_best, kol_am] if pakai_alamat else None
-                df_murni.at[ix_, "_NAMA_MASTER_SAMA"] = df_lama.at[mi_best, "PNAMLANG_AKHIR"]
-                df_murni.at[ix_, "_KOTA_MASTER_SAMA"] = df_lama.at[mi_best, "KOTA_BARU"]
-                df_murni.at[ix_, "_SEG_MASTER_SAMA"] = df_lama.at[mi_best, "SEGMENT_BARU"]
-                df_murni.at[ix_, "PNAMLANG_MASTER_SAMA"] = df_lama.at[mi_best, "PNAMLANG_AKHIR"]
-                df_murni.at[ix_, "SKOR_ALAMAT_SAMA"] = None if skor is None else round(skor, 2)
-                baris_id_ = idmap_m.get(str(id_m), [])
-                df_murni.at[ix_, "JML_ROW_MASTER_SAMA"] = len(baris_id_)
-                if kol_cm:
-                    cl_ = []
-                    for x_ in baris_id_:
-                        v_ = df_lama.at[x_, kol_cm]
-                        if pd.notna(v_) and str(v_) not in cl_:
-                            cl_.append(str(v_))
-                    df_murni.at[ix_, "CUST_ID_MASTER_SAMA"] = ", ".join(cl_[:8]) + (" ..." if len(cl_) > 8 else "")
-        sama = pd.Series(False, index=df_murni.index)
-        for ix_, _, _ in dup_list:
-            sama.at[ix_] = True
-        if lewati_duplikat and dup_list:
-            for ix_, id_m, skor in dup_list:
-                L("DUPLIKAT DILEWATI", id_m, f"'{df_murni.at[ix_, 'PNAMLANG_AKHIR']}' sama dengan outlet master (nama+kota+segmen"
-                  + (f", alamat mirip {skor:.2f}" if skor is not None else ", alamat tidak dibandingkan") + "); tidak dibuat ID baru", row=rb(df_murni.at[ix_, "BARIS_EXCEL"]))
-            n_dup_lewat = len(dup_list)
-        elif dup_list:
-            L("INFO", "", f"{len(dup_list)} baris sama dengan master tetapi tetap diberi ID baru (opsi lewati duplikat mati)")
-            sama[:] = False
+            alamat_info = f"alamat mirip {skor:.2f}" if skor is not None else "alamat tidak dapat dibandingkan"
+            df_murni.at[ix_, "_CATATAN_DUP"] = (f"Nama+kota+segmen sama dengan outlet master {id_m} ({alamat_info}), tetapi CUST_ID berbeda; "
+                                                f"wajib diputuskan: centang GABUNG (jadi row baru ber-ID {id_m}) jika outlet yang sama, "
+                                                f"setujui jika outlet berbeda (jadi ID baru), atau HAPUS")
+            df_murni.at[ix_, "ID_MASTER_SAMA"] = id_m
+            df_murni.at[ix_, "ALAMAT_MASTER_SAMA"] = df_lama.at[mi_best, kol_am] if pakai_alamat else None
+            df_murni.at[ix_, "_NAMA_MASTER_SAMA"] = df_lama.at[mi_best, "PNAMLANG_AKHIR"]
+            df_murni.at[ix_, "_KOTA_MASTER_SAMA"] = df_lama.at[mi_best, "KOTA_BARU"]
+            df_murni.at[ix_, "_SEG_MASTER_SAMA"] = df_lama.at[mi_best, "SEGMENT_BARU"]
+            df_murni.at[ix_, "PNAMLANG_MASTER_SAMA"] = df_lama.at[mi_best, "PNAMLANG_AKHIR"]
+            df_murni.at[ix_, "SKOR_ALAMAT_SAMA"] = None if skor is None else round(skor, 2)
+            baris_id_ = idmap_m.get(str(id_m), [])
+            df_murni.at[ix_, "JML_ROW_MASTER_SAMA"] = len(baris_id_)
+            if kol_cm:
+                cl_ = []
+                for x_ in baris_id_:
+                    v_ = df_lama.at[x_, kol_cm]
+                    if pd.notna(v_) and str(v_) not in cl_:
+                        cl_.append(str(v_))
+                df_murni.at[ix_, "CUST_ID_MASTER_SAMA"] = ", ".join(cl_[:8]) + (" ..." if len(cl_) > 8 else "")
         nm_map = dict(zip(km, df_murni["PNAMLANG_AKHIR"]))
-        sisa = km[~sama]
-        for k_ in sisa[sisa.duplicated(keep=False)].unique():
+        for k_ in km[km.duplicated(keep=False)].unique():
             L("PERINGATAN", "", f"Muncul lebih dari sekali di file data baru: {nm_map[k_]}")
-        df_murni = df_murni[~sama]
     df_ditolak = clean_dataframe_baru(df_ditolak) if len(df_ditolak) else df_ditolak
     df_calon = pd.concat([df_murni] + ([df_ditolak] if len(df_ditolak) else []), ignore_index=True)
     if df_calon.empty:
@@ -2560,7 +2542,7 @@ def _jalankan(st, keputusan, pertahankan=False):
     c = cache_db(st)
     wil, pedoman, known = c["wil"], c["pedoman"], c["known"]
     res = run_mdm(c["master"], st.session_state["sh_baru"], wil, a["timpa"], a["fallback"],
-                  a["sheet_baru"], a["sheet_match"], a["lewati"], a["cust_cfg"], keputusan, pedoman=pedoman,
+                  a["sheet_baru"], a["sheet_match"], a["cust_cfg"], keputusan, pedoman=pedoman,
                   kota_override=st.session_state.get("kota_override", {}), nama_override=st.session_state.get("nama_override", {}),
                   master_nama_override=st.session_state.get("master_nama_override", {}), cache=c["mdm"],
                   df_bersih=a.get("df_bersih"), ganti_id=bool(st.session_state.get("ganti_id_aktif", False)),
@@ -2880,7 +2862,7 @@ def page_update(st):
         st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). Tanpa pedoman, kota/segmen baru tidak bisa diberi ID.")
 
     f_baru = st.file_uploader("Upload data baru (.xlsx)", type=["xlsx"])
-    timpa, lewati, fallback = False, True, ""
+    timpa, fallback = False, ""
 
     if f_baru:
         data = f_baru.getvalue()
@@ -2921,7 +2903,7 @@ def page_update(st):
                         n_cust = len(cocokkan_cust(cl, c["master"], cust_cfg, {}, cache=c["mdm"])["semua"]) if cust_cfg else 0
                     except Exception:
                         n_cust = 0
-                    ss["run_args"] = dict(timpa=timpa, fallback=fallback, sheet_baru=sheet_baru, lewati=lewati,
+                    ss["run_args"] = dict(timpa=timpa, fallback=fallback, sheet_baru=sheet_baru,
                                           sheet_match=None, cust_cfg=cust_cfg)
                     ss.pop("ganti_id", None)
                     ss.update(ganti_id_aktif=True)   # PERBARUI NAMA MASTER: ID_STR_OUTLET master mengikuti segmen/kota terbaru
