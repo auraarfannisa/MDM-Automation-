@@ -686,6 +686,24 @@ KATEGORI_MASALAH = [
 ]
 
 
+# Warna baris tabel Tahap 1 menurut level prioritas (lihat skor_risiko). Warna SELALU tampil, baik pilihan
+# "Urutkan berdasarkan prioritas" aktif maupun tidak, supaya pengguna tahu baris mana yang dibenarkan lebih dulu.
+# Warna memakai transparansi agar tetap terbaca di tema terang maupun gelap.
+LABEL_PRIORITAS = {3: "🔴 Utama", 2: "🟠 Penting", 1: "🟡 Cek", 0: ""}
+WARNA_PRIORITAS = {3: "rgba(255, 75, 75, 0.28)", 2: "rgba(255, 150, 40, 0.26)", 1: "rgba(255, 215, 0, 0.20)", 0: ""}
+
+
+def level_prioritas(cat):
+    """Level 3 (paling mendesak) .. 0 (bersih) dari teks CATATAN_CEK."""
+    return kategori_masalah(cat)[0]
+
+
+def warna_baris_prioritas(row):
+    """Dipakai pandas Styler (axis=1): beri warna seluruh baris sesuai level prioritasnya."""
+    w = WARNA_PRIORITAS.get(level_prioritas(row.get("CATATAN_CEK")), "")
+    return [f"background-color: {w}" if w else "" for _ in row.index]
+
+
 def kategori_masalah(cat):
     """(skor, urutan kategori, label) catatan pemeriksaan tahap 1. Bersih = (0, 0, '')."""
     c = "" if cat is None or pd.isna(cat) else str(cat)
@@ -2904,6 +2922,7 @@ def tampil_cleansing(st):
         t0["KOTA_BARU"] = t0["KOTA_BARU"].map(lambda v: v if _t(v) else None).astype(object)
         t0["SEGMENT_BARU"] = t0["SEGMENT_BARU"].map(lambda v: v if _t(v) else None).astype(object)
         t0.insert(0, "NO.", [int(i_) + 1 for i_ in t0.index])
+        t0.insert(1, "PRIORITAS", t0["CATATAN_CEK"].map(lambda c: LABEL_PRIORITAS[level_prioritas(c)]))
         ss.update(cl_snap=t0, cl_snap_base=cl, cl_snap_key=kunci_snap)
     t0, cl_base = ss["cl_snap"], ss["cl_snap_base"]
     if len(t0) == 0:
@@ -2918,14 +2937,21 @@ def tampil_cleansing(st):
             col_kota = st.column_config.TextColumn("KOTA_BARU (edit)")
         cfg = {
             "NO.": kolom_no(st),
+            "PRIORITAS": st.column_config.TextColumn("PRIORITAS", help="Urutan yang perlu dibenarkan lebih dulu: Utama > Penting > Cek."),
             "CATATAN_CEK": st.column_config.TextColumn("CATATAN PEMERIKSAAN"),
             "PNAMLANG_AKHIR": st.column_config.TextColumn("PNAMLANG_AKHIR (edit)"),
             "KOTA_BARU": col_kota,
             "SEGMENT_BARU": col_segment(st, opsi_segment(t0["SEGMENT_BARU"].dropna())),
         }
         edit = ["KOTA_BARU", "PNAMLANG_AKHIR", "SEGMENT_BARU"]
-        ed = st.data_editor(t0, key=f"cl_{kunci_snap}", hide_index=True, width="stretch",
-                            disabled=[c for c in t0.columns if c not in edit], column_config=cfg)
+        st.caption("Warna baris: 🔴 Utama (kota diubah otomatis / salah ketik) · 🟠 Penting (alamat, CUST_ID, segmen tidak sesuai) · "
+                   "🟡 Cek (catatan lain) · tanpa warna = bersih. Warna tetap tampil walau pengurutan dimatikan.")
+        argumen = dict(key=f"cl_{kunci_snap}", hide_index=True, width="stretch",
+                       disabled=[c for c in t0.columns if c not in edit], column_config=cfg)
+        try:   # tabel berwarna (Streamlit baru); bila versi Streamlit belum mendukung, tampil tanpa warna (kolom PRIORITAS tetap ada)
+            ed = st.data_editor(t0.style.apply(warna_baris_prioritas, axis=1), **argumen)
+        except Exception:
+            ed = st.data_editor(t0, **argumen)
         # edit user -> data aktif (tanpa memuat ulang tabel, agar posisi scroll tidak kembali ke atas)
         ss["cl"] = terapkan_edit_cleansing(cl_base, ed) if not ed[edit].fillna("").astype(str).equals(
             t0[edit].fillna("").astype(str)) else cl_base
