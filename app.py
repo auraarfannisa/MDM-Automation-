@@ -3051,7 +3051,7 @@ def tampil_cleansing(st):
             "SEGMENT_BARU": col_segment(st, opsi_segment(t0["SEGMENT_BARU"].dropna())),
         }
         edit = ["KOTA_BARU", "PNAMLANG_AKHIR", "SEGMENT_BARU"]
-        st.caption("Warna kelompok dan baris: 🔴 Utama · 🟠 Penting · 🟡 Cek · 🔵/🟢 tidak perlu diperiksa. "
+        st.caption("Ikon kelompok: 🔴 Utama · 🟠 Penting · 🟡 Cek · 🔵/🟢 tidak perlu diperiksa. "
                    "Kelompok diurutkan dari yang paling perlu dibenarkan lebih dulu.")
         eds, tampil = [], []
         for n_g, label in enumerate(GRUP_URUT):
@@ -3069,10 +3069,7 @@ def tampil_cleansing(st):
                     continue
                 argumen = dict(key=f"cl_{kunci_snap}_{n_g}", hide_index=True, width="stretch",
                                disabled=[c for c in sub.columns if c not in edit], column_config=cfg)
-                try:   # tabel berwarna (Streamlit baru); bila belum didukung, tampil tanpa warna (kolom PRIORITAS tetap ada)
-                    ed_g = st.data_editor(sub.style.apply(warna_baris_prioritas, axis=1), **argumen)
-                except Exception:
-                    ed_g = st.data_editor(sub, **argumen)
+                ed_g = st.data_editor(sub, **argumen)   # baris tabel tidak diwarnai; prioritas ditandai ikon kelompok & kolom PRIORITAS
                 eds.append(ed_g)
                 tampil.append(sub)
         # edit user -> data aktif (tanpa memuat ulang tabel, agar posisi scroll tidak kembali ke atas)
