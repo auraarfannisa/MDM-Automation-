@@ -66,6 +66,11 @@ KAMUS_17_DAERAH = {
     "TAKENGON": "KAB. ACEH TENGAH",
     "TANGGERONG": "KAB. KUTAI KARTANEGARA",
     "TENGGARONG": "KAB. KUTAI KARTANEGARA",
+    "PUTUSSIBAU": "KAB. KAPUAS HULU",
+    "KUALAKAPUAS": "KAB. KAPUAS",
+    "KUALA KAPUAS": "KAB. KAPUAS",
+    "PANYABUNGAN": "KAB. MANDAILING NATAL",
+    "CIBINONG": "KAB. BOGOR",
 }
 
 
@@ -135,14 +140,14 @@ def bangun_nama(dasar, kota, segment, suffix=None):
 # Deskriptor fasilitas yang menumpang setelah koma di belakang nama, mis. 'SEPULU, PUSKESMAS', 'SAIYO, APT PARIAMAN',
 # 'FAISAL, RSI., APT.', 'SKINVEST, KLINIK PRATAMA SIDOARJO': seluruh bagian setelah koma dibuang (suffix dibangun dari segmen).
 _RX_DESKRIPTOR_KOMA = re.compile(
-    r"\s*,\s*(?:KLINIK\s+(?:PRATAMA|UTAMA)\b.*|KLINIK\.?\s*|"
-    r"(?:PUSKESMAS|PKM|APOTEK|APOTIK|APT|RUMAH\s+SAKIT|RS[A-Z]{0,5})\b.*)$")
+    r"\s*,\s*(?:KLINIK\s+(?:PRATAMA|UTAMA)\b.*|(?:UTAMA|PRATAMA)\s+KLINIK\b.*|KLINIK\.?\s*|"
+    r"(?:PUSKESMAS|PKM|PKU|APOTEK|APOTIK|APT|RUMAH\s+SAKIT|RS[A-Z]{0,5})\b.*)$")
 # 'PUTRI APT, BT SANGKAR' -> 'PUTRI' (APT di tengah nama, lokasi setelah koma)
 _RX_APT_LOKASI = re.compile(r"^(.+?)\s+(?:APT|APOTEK|APOTIK)\.?\s*,.*$")
 # Prefix fasilitas generik; \b mencegah 'APOTEKKU' terpotong jadi 'KU'. KLINIK PRATAMA/UTAMA dibuang utuh.
 _RX_PREFIX_FASILITAS = re.compile(
-    r"^(?:PUSKESMAS|PKM|RUMAH\s+SAKIT|RSUD|RSUP|RSIA|RSAD|RSAL|RSAU|RSPOL|RSU?|"
-    r"APOTEK|APOTIK|APT|KLINIK\s+(?:PRATAMA|UTAMA)|KLINIK)\b\.?\s*[,:\-]?\s*")
+    r"^(?:UPTD|UPT|PUSKESMAS|PKM|RUMAH\s+SAKIT|RSUD|RSUP|RSIA|RSAD|RSAL|RSAU|RSPOL|RSU?|"
+    r"APOTEK|APOTIK|APT|AP|KLINIK\s+(?:PRATAMA|UTAMA)|KLINIK)\b\.?\s*[,:\-]?\s*")
 _RX_DINKES = re.compile(r"^(?:DINAS\s+KESEHATAN|DINKES)\b\.?[\s,:\-]*")
 _RX_WILAYAH_AWAL = re.compile(r"^(?:KABUPATEN|KAB|KOTA|PROVINSI|PROV)\b\.?\s+")
 _RX_KURUNG_AKHIR = re.compile(r"\s*\(([^()]*)\)\s*$")
@@ -178,6 +183,7 @@ def clean_name_parts(raw_name, raw_segment):
     name = re.sub(r'"{2,}', '"', name)
     name = re.sub(r"\s+", " ", name).strip()
     name = re.sub(r"\bK\s*-\s*24\b", "K24", name)
+    ada_pt = bool(re.match(r"^PT\b", name))          # nama diawali PT: akhiran nama menjadi ', PT' (apa pun segmennya)
     name = re.sub(r"^PT\b\.?[\s,]*", "", name)
 
     # DINAS KESEHATAN / DINKES: nama = wilayahnya (tanpa KABUPATEN/KAB./KOTA/PROVINSI), segmen TDR, suffix DINKES.
@@ -192,6 +198,10 @@ def clean_name_parts(raw_name, raw_segment):
     # 'PUTRI APT, BT SANGKAR' -> 'PUTRI'; deskriptor fasilitas setelah koma ('SEPULU, PUSKESMAS') dibuang.
     name = _RX_APT_LOKASI.sub(r"\1", name)
     name = _RX_DESKRIPTOR_KOMA.sub("", name)
+    # Kata layanan yang bukan bagian nama dibuang di posisi mana pun: RAWAT INAP, RAWAT JALAN, KLINIK PRATAMA/UTAMA.
+    name = re.sub(r"\bRAWAT\s+(?:INAP|JALAN)\b", " ", name)
+    name = re.sub(r"\s+KLINIK\s+(?:PRATAMA|UTAMA)\b", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
     awal = name   # cadangan bila semua isi nama terbuang (mis. 'RSUD KAB. SORONG' -> 'SORONG')
 
     # Buang keterangan lokasi setelah slash, mis. /BONE, /JPR,
@@ -224,7 +234,11 @@ def clean_name_parts(raw_name, raw_segment):
             suffix_khusus = "RS UNIV"
 
     # Prefix fasilitas generik. RSU. APBD -> nama tidak menyisakan APBD.
-    name = _RX_PREFIX_FASILITAS.sub("", name, count=1)
+    for _ in range(3):   # bisa berlapis, mis. 'UPT PUSKESMAS RANTANG'
+        tanpa = _RX_PREFIX_FASILITAS.sub("", name, count=1)
+        if tanpa == name or not tanpa.strip():
+            break
+        name = tanpa
 
     # Descriptor fasilitas generik di ujung nama.
     name = re.sub(r"(?:,\s*|\s+)KLINIK\s+(?:PRATAMA|UTAMA)\s*$", "", name, flags=re.IGNORECASE)
@@ -244,12 +258,55 @@ def clean_name_parts(raw_name, raw_segment):
     if segment == "DINKES":   # segmen DINKES di data = TDR; nama tetap berakhiran ', DINKES'
         segment = "TDR"
         suffix_khusus = suffix_khusus or "DINKES"
+    if ada_pt and suffix_khusus is None:
+        suffix_khusus = "PT"
     return name, segment, suffix_khusus
 
 
 def clean_name_and_segment(raw_name, raw_segment, kota=None):
     dasar, segment, sfx = clean_name_parts(raw_name, raw_segment)
     return bangun_nama(dasar, kota, segment, sfx), segment
+
+
+def buang_lokasi_nama(nama, pedoman):
+    """Buang lokasi di ujung nama bila lokasi itu nama kab/kota di pedoman, mis. 'AP.AMPUH - PATI' -> 'AP.AMPUH',
+    'PADANG EYE CENTER, AGAM' -> 'PADANG EYE CENTER'. Lokasi resmi sudah ada di kolom kota. Tanpa pedoman: tidak diubah."""
+    if nama is None or pd.isna(nama) or not pedoman or not pedoman.get("by_base"):
+        return nama
+    t = str(nama).strip().upper()
+    for rx in (r"^(.*\S)\s+-\s+([A-Z][A-Z .']*)$", r"^(.*\S)\s*,\s*([A-Z][A-Z .']*)$"):
+        m = re.match(rx, t)
+        if m and _kunci_teks(m.group(2)) in pedoman["by_base"]:
+            t = m.group(1).strip()
+    return t
+
+
+def buang_kota_di_akhir(dasar, kota):
+    """Buang nama kota yang menempel di ujung nama dasar, mis. 'HERMINA BADUNG' + KAB. BADUNG -> 'HERMINA'.
+    Nama tidak boleh sampai kosong: bila isinya hanya nama kota, dibiarkan."""
+    if not dasar or kota is None or pd.isna(kota):
+        return dasar
+    k = re.sub(r"^(?:KAB|KOTA)\.?\s+", "", _norm_kab(kota))
+    t = str(dasar)
+    if k and t.upper().endswith(" " + k) and len(t) > len(k) + 1:
+        return t[:-(len(k) + 1)].rstrip(" ,.-")
+    return dasar
+
+
+# Nama akhir 'NAMA (KOTA), SUFFIX' dipecah kembali bila pengguna mengedit nama langsung. Dengan begitu nama dasar dan
+# akhiran hasil edit manual (mis. ', PT') ikut terbawa saat kota/segmen diubah kemudian, tidak hilang.
+_RX_NAMA_AKHIR = re.compile(r"^(.*?)(?:\s*\([^()]*\))?\s*,\s*([A-Z0-9][A-Z0-9 .]*)$")
+
+
+def sinkron_dasar_dari_nama(d, i):
+    """Perbarui kolom _NAMA_DASAR dan _SUFIKS baris i dari PNAMLANG_AKHIR yang diedit pengguna."""
+    m = _RX_NAMA_AKHIR.match(str(d.at[i, "PNAMLANG_AKHIR"]).strip().upper())
+    if not m or not m.group(1).strip(" ,"):
+        return
+    seg = str(d.at[i, "SEGMENT_BARU"]).strip().upper() if pd.notna(d.at[i, "SEGMENT_BARU"]) else ""
+    sfx = m.group(2).strip()
+    d.at[i, "_NAMA_DASAR"] = m.group(1).strip(" ,")
+    d.at[i, "_SUFIKS"] = None if sfx == SEGMENT_SUFFIX.get(seg, "") else sfx
 
 
 # ==============================================================================
@@ -318,13 +375,17 @@ def kota_resmi(k, pedoman):
     return bool(pedoman) and _norm_kab(k) in pedoman["wil"]
 
 
-def cari_kota_dari_kecamatan(alamat, kota, kec_idx):
+def cari_kota_dari_kecamatan(alamat, kota, kec_idx, pedoman=None):
     """Cari kecamatan di alamat (mis. '... LENTENG AGUNG - JAGAKARSA') lalu pilih kab/kota yang kecamatannya cocok
     dan namanya memuat kota generik (mis. JAKARTA). Kembalikan (kab/kota atau None, catatan)."""
     base = kunci_wilayah(kota)[1]
     if not base or not kec_idx:
         return None, ""
-    segs = [x.strip() for x in re.split(r"\s*[-,;/()]\s*", str(alamat).upper()) if x.strip()]
+    # Nama kota ada sebagai KAB. dan KOTA (mis. MALANG): tanpa penanda 'KEC.' di alamat, tebakan dari kata di alamat
+    # tidak cukup kuat, jadi kota tidak diubah otomatis (hanya diberi catatan agar dipilih manual).
+    ganda = bool(pedoman) and len(pedoman.get("by_base", {}).get(base, [])) > 1
+    mk = _RX_KEC.search(re.sub(r"\s+", " ", str(alamat).upper()))
+    segs = [mk.group(1).strip(" .")] if mk else [x.strip() for x in re.split(r"\s*[-,;/()]\s*", str(alamat).upper()) if x.strip()]
     for seg in reversed(segs):
         words = re.sub(r"[^A-Z0-9 ]", " ", seg).split()
         hasil = set()
@@ -333,6 +394,9 @@ def cari_kota_dari_kecamatan(alamat, kota, kec_idx):
                 for kab in kec_idx.get("".join(words[i:i + n]), ()):
                     if base in kunci_wilayah(kab)[1]:
                         hasil.add(kab)
+        if len(hasil) == 1 and ganda and not mk:
+            return None, (f"Kota '{kota}' bisa KAB. atau KOTA; kecamatan di alamat mengarah ke {next(iter(hasil))} "
+                          "tetapi tanpa penanda KEC.; pilih KOTA_BARU secara manual")
         if len(hasil) == 1:
             return next(iter(hasil)), ""
         if len(hasil) > 1:
@@ -727,6 +791,11 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
                     if memo_typo[k]:
                         cat.append(f"Kota diduga salah ketik ({k} -> {memo_typo[k]}), periksa kembali")
                         k, diubah = memo_typo[k], True
+                # Aturan khusus: alamat memuat KUTA tetapi kota tertulis DENPASAR -> yang benar KAB. BADUNG
+                if (not pd.isna(a) and not kamus and kunci_wilayah(k)[1] == "DENPASAR"
+                        and re.search(r"\bKUTA\b", str(a).upper())):
+                    cat.append(f"Alamat memuat KUTA, kota {k} diubah otomatis ke KAB. BADUNG, periksa kembali")
+                    k, diubah = kanonik_kota("KAB. BADUNG", pedoman), True
                 if not pd.isna(a) and not kamus:
                     # Lapis 2a: kab/kota tertulis eksplisit di alamat (KAB. X / KOTA X)
                     eks = kota_eksplisit_di_alamat(a, pedoman)
@@ -743,7 +812,7 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
                     # Lapis 2b: kecamatan / kelurahan di alamat harus ada di kota itu (memerlukan master wilayah)
                     if not eks_cocok and kec_idx:
                         if not kota_resmi(k, pedoman):
-                            kab, c1 = cari_kota_dari_kecamatan(a, k, kec_idx)
+                            kab, c1 = cari_kota_dari_kecamatan(a, k, kec_idx, pedoman)
                             if kab:
                                 kn = kanonik_kota(kab, pedoman)
                                 c1, k, diubah = f"Kota ditentukan dari kecamatan di alamat ({k} -> {kn})", kn, True
@@ -789,8 +858,11 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
     df["_CAT_SEG"] = pd.Series(cat_seg, index=df.index, dtype=object)
     seg = pd.Series(seg_l, index=df.index, dtype=object)
     parts = []
-    for n, s_, ch in zip(nama, seg, (df[kol_ch] if kol_ch else [None] * len(df))):
+    kota_l = list(df["KOTA_BARU"])
+    for n, s_, ch, k_ in zip(nama, seg, (df[kol_ch] if kol_ch else [None] * len(df)), kota_l):
+        n = buang_lokasi_nama(n, pedoman)                 # lokasi di ujung nama (' - PATI', ', AGAM') dibuang
         d_, sg_, sf_ = clean_name_parts(n, s_)
+        d_ = buang_kota_di_akhir(d_, k_)                  # nama kota yang menempel di nama dasar dibuang
         if sg_ == "TDR" and sf_ is None and re.match(r"^DINKES\b", re.sub(r"[\s_]+", " ", _t(ch).strip().upper())):
             sf_ = "DINKES"   # segmen TDR + CHANNEL OUTLET DINKES: nama berakhiran ', DINKES'
         parts.append((d_, sg_, sf_))
@@ -1625,6 +1697,10 @@ def terapkan_edit(rv, ed, max_seq, prefix_map, pedoman, known_wil):
         d.loc[idx, c] = [None if _s(x) == "" else _s(x) for x in ed[c]]
     d["PNAMLANG_AKHIR"] = d["PNAMLANG_AKHIR"].astype(object)
     d.loc[idx, "PNAMLANG_AKHIR"] = ed["PNAMLANG_AKHIR"].values
+    if "_NAMA_DASAR" in d.columns and "_SUFIKS" in d.columns:   # nama diedit langsung: simpan nama dasar & akhirannya
+        for i in idx:
+            if str(ed.at[i, "PNAMLANG_AKHIR"]) != str(rv.at[i, "PNAMLANG_AKHIR"]):
+                sinkron_dasar_dari_nama(d, i)
     for c in ("SETUJU", "BUANG", "GABUNG"):
         if c not in ed.columns:
             continue
@@ -1685,13 +1761,14 @@ def susun_log(res, rv):
               f"'{nama}' (baris {r.get('BARIS_EXCEL')}) digabung ke outlet master; nama+kota+segmen sama, "
               f"alamat baru '{r.get('ALAMAT')}' vs master '{r.get('ALAMAT_MASTER_SAMA')}'; row baru dengan ID master", row=r)
             continue
+        # Satu outlet = satu baris log ('ID BARU'). Edit manual dan persetujuan dicatat DI DALAM keterangannya,
+        # bukan baris terpisah, supaya hasil unduhan tidak merekam outlet yang sama dua kali.
+        ket = " (diputuskan outlet berbeda dari master " + _t(r.get("ID_MASTER_SAMA")) + ")" if ada_m and r["SETUJU"] else ""
         if (_s(r["KOTA_BARU"]) != _s(r["_KOTA_AWAL"]) or _s(r["SEGMENT_BARU"]) != _s(r["_SEG_AWAL"])
                 or _s(nama) != _s(r["_AKHIR_AWAL"])):
-            L(sm, "EDIT MANUAL", r["ID_STR_OUTLET"], f"{r['_AKHIR_AWAL']} / {r['_KOTA_AWAL']} / {r['_SEG_AWAL']}  ->  "
-              f"{nama} / {r['KOTA_BARU']} / {r['SEGMENT_BARU']}", row=r)
+            ket += (f"; diedit manual dari {r['_AKHIR_AWAL']} / {r['_KOTA_AWAL']} / {r['_SEG_AWAL']}")
         if r["SETUJU"] and _t(r.get("CATATAN_CEK")).strip() and not ada_m:
-            L(sm, "DISETUJUI", r["ID_STR_OUTLET"], f"{nama}: catatan disetujui ({r['CATATAN_CEK']})", row=r)
-        ket = " (diputuskan outlet berbeda dari master " + _t(r.get("ID_MASTER_SAMA")) + ")" if ada_m and r["SETUJU"] else ""
+            ket += f"; catatan disetujui ({r['CATATAN_CEK']})"
         L(sm, "ID BARU", r["ID_STR_OUTLET"], f"{nama} | {r['KOTA_BARU']} | {r['SEGMENT_BARU']}{ket}", row=r)
     return pd.DataFrame(log)
 
@@ -2213,9 +2290,11 @@ def simpan_update(df_final, df_asli, df_log, nama_file, hash_file, ringkasan, ba
     waktu = pd.Timestamp(now_wib())
     ensure_meta_tables()
     with engine().begin() as conn:
-        for kol in ("created_at", "batch_week"):
-            conn.execute(text(f"ALTER TABLE {TABLE_MASTER} ADD COLUMN IF NOT EXISTS {kol} "
-                              + ("TIMESTAMPTZ DEFAULT now()" if kol == "created_at" else "TEXT")))
+        # created_at = kapan baris dibuat; batch_week = batch pembuatnya; updated_at = kapan baris terakhir DIUBAH
+        # (mis. nama/kota/segmen berubah atau ID_STR_OUTLET berganti). Baris yang belum pernah diubah: updated_at kosong.
+        tipe_kol = {"created_at": "TIMESTAMPTZ DEFAULT now()", "batch_week": "TEXT", "updated_at": "TIMESTAMPTZ"}
+        for kol, tipe in tipe_kol.items():
+            conn.execute(text(f"ALTER TABLE {TABLE_MASTER} ADD COLUMN IF NOT EXISTS {kol} {tipe}"))
         conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": LOCK_KEY})
         # pengaman: ID baru tidak boleh sudah dipakai (mis. oleh penyimpanan lain sejak proses dijalankan)
         id_lama = set(df_asli["ID_STR_OUTLET"].dropna().astype(str))
@@ -2236,15 +2315,15 @@ def simpan_update(df_final, df_asli, df_log, nama_file, hash_file, ringkasan, ba
                 if pakai:
                     raise ValueError("ID pengganti sudah dipakai di master: " + ", ".join(pakai[:5]) + ". Jalankan ulang cek & cleansing.")
             kol_tbl = {c["name"] for c in inspect(conn).get_columns(TABLE_MASTER)}
-            set_sql = ('"PNAMLANG_AKHIR" = :n, "KOTA_BARU" = :k, "ID_STR_OUTLET" = :i'
+            set_sql = ('"PNAMLANG_AKHIR" = :n, "KOTA_BARU" = :k, "ID_STR_OUTLET" = :i, updated_at = :w'
                        + (', "SEGMENT_BARU" = :s' if "SEGMENT_BARU" in kol_tbl else ""))
             conn.execute(text(f'UPDATE {TABLE_MASTER} SET {set_sql} WHERE "ID_STR_OUTLET" = :lama'),
                          [{"n": _t(r.PNAMLANG_AKHIR), "k": (None if _t(r.KOTA_BARU) == "" else _t(r.KOTA_BARU)),
                            "s": (None if _t(r.SEGMENT_BARU) == "" else _t(r.SEGMENT_BARU)),
-                           "i": _t(r.ID_STR_OUTLET), "lama": _t(r.ID_LAMA)} for r in ubah.itertuples(index=False)])
+                           "i": _t(r.ID_STR_OUTLET), "lama": _t(r.ID_LAMA), "w": waktu} for r in ubah.itertuples(index=False)])
         info = inspect(conn).get_columns(TABLE_MASTER)
         kolom_tbl = [c["name"] for c in info]
-        out = baru.drop(columns=[c for c in ("created_at", "batch_week") if c in baru.columns]).copy()
+        out = baru.drop(columns=[c for c in ("created_at", "batch_week", "updated_at") if c in baru.columns]).copy()
         out["created_at"] = waktu
         out["batch_week"] = batch_week
         out = out[[c for c in out.columns if c in kolom_tbl]].copy()
@@ -2595,7 +2674,7 @@ def _jalankan(st, keputusan, pertahankan=False):
         for i, b in zip(rv.index, rv["BARIS_EXCEL"]):
             if b in pl.index:
                 # baris yang kota/segmen/namanya diubah di tab Penetapan ID Outlet: mengikuti pilihan itu, bukan edit lama di Review
-                for c in ("KOTA_BARU", "PNAMLANG_AKHIR", "SEGMENT_BARU", "SETUJU", "BUANG", "GABUNG"):
+                for c in ("KOTA_BARU", "PNAMLANG_AKHIR", "SEGMENT_BARU", "SETUJU", "BUANG", "GABUNG", "_NAMA_DASAR", "_SUFIKS"):
                     if ((c == "KOTA_BARU" and b in ko_) or (c == "SEGMENT_BARU" and b in so_)
                             or (c == "PNAMLANG_AKHIR" and (b in ko_ or b in no_ or b in so_))):
                         continue
@@ -2779,6 +2858,7 @@ def terapkan_edit_cleansing(cl, ed):
         d.at[i, "SEGMENT_BARU"] = s_new or None
         if n_new != n_old:
             d.at[i, "PNAMLANG_AKHIR"] = n_new
+            sinkron_dasar_dari_nama(d, i)   # akhiran hasil edit (mis. ', PT') terbawa saat kota/segmen diubah lagi
         else:
             d.at[i, "PNAMLANG_AKHIR"] = bangun_nama(d.at[i, "_NAMA_DASAR"], k_new or None, s_new or None, d.at[i, "_SUFIKS"])
     return d
