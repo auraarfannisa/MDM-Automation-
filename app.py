@@ -71,6 +71,9 @@ KAMUS_17_DAERAH = {
     "KUALA KAPUAS": "KAB. KAPUAS",
     "PANYABUNGAN": "KAB. MANDAILING NATAL",
     "CIBINONG": "KAB. BOGOR",
+    "CIPUTAT": "KOTA TANGERANG SELATAN",
+    "BATUSANGKAR": "KAB. TANAH DATAR",
+    "BATU SANGKAR": "KAB. TANAH DATAR",
 }
 
 
@@ -447,12 +450,14 @@ _RX_KEL = re.compile(
     r"(?=\s+(?:KEC(?:AMATAN)?|KAB(?:UPATEN)?|KOTA|PROV(?:INSI)?|RT|RW|NO)\b|\s*[,;()/]|$)")
 
 
-def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None):
+def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None, bukti_master=None):
     """Cek apakah kecamatan di alamat benar ada di kota. Kembalikan (kota koreksi atau None, catatan atau '').
     Kecamatan diambil dari penanda 'KEC. X'; bila tidak ada penanda, dari segmen terakhir alamat (hanya catatan, tidak
     pernah mengubah kota). Kota diganti hanya bila tepat satu kab/kota yang masuk akal setelah nama kecamatan kembar
     dipersempit dengan kelurahan di alamat ('KEL. Y') dan provinsi kota yang tertulis, dan buktinya kuat:
-    kelurahan cocok, atau provinsinya sama dengan kota yang tertulis."""
+    kelurahan cocok, atau provinsinya sama dengan kota yang tertulis.
+    bukti_master = kota yang SUDAH tercatat di master untuk CUST_ID + distributor yang sama. Bila kecamatan/kelurahan di alamat
+    ada di kota itu, dua bukti saling menguatkan (alamat + master) sehingga kota langsung diubah otomatis."""
     if not kec_idx or kota is None or alamat is None or pd.isna(kota) or pd.isna(alamat):
         return None, ""
     nama = kota_pusat_distributor(kota)
@@ -502,6 +507,10 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None):
             if sama:
                 narrowed = sama
         dasar = f"Alamat dan kota tidak sesuai: KEC. {kec_txt} tidak ada di {kota}"
+        bm = _norm_kab(bukti_master) if bukti_master else ""
+        if bm and bm in narrowed and KOREKSI_OTOMATIS_KOTA:      # alamat + master menunjuk kota yang sama
+            kanon = kanonik_kota(bm, pedoman)
+            return kanon, f"{dasar}; kota diubah otomatis ({kota} -> {kanon}), periksa kembali"
         if len(narrowed) == 1:
             kab = next(iter(narrowed))
             kuat = via_kel or bool(prov.get(kab, set()) & prov_k)
@@ -523,6 +532,10 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None):
                 if di_kota(kab_):
                     prov_k |= pv
             dasar = f"Alamat dan kota tidak sesuai: KEL./DESA {kel_txt} tidak ada di {kota}"
+            bm = _norm_kab(bukti_master) if bukti_master else ""
+            if bm and bm in kab_set and KOREKSI_OTOMATIS_KOTA:
+                kanon = kanonik_kota(bm, pedoman)
+                return kanon, f"{dasar}; kota diubah otomatis ({kota} -> {kanon}), periksa kembali"
             if len(kab_set) == 1:
                 kab = next(iter(kab_set))
                 kanon = kanonik_kota(kab, pedoman)
@@ -546,6 +559,14 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None):
         return None, ""
     if any(di_kota(c) for cands in ditemukan.values() for c in cands):
         return None, ""
+    bm = _norm_kab(bukti_master) if bukti_master else ""
+    if bm and KOREKSI_OTOMATIS_KOTA:
+        # tanpa penanda KEC., tetapi kecamatan di alamat ada di kota yang dicatat master untuk CUST_ID yang sama
+        for teks_, cands_ in ditemukan.items():
+            if bm in cands_:
+                kanon = kanonik_kota(bm, pedoman)
+                return kanon, (f"Alamat dan kota tidak sesuai (diduga): kecamatan {teks_} ada di {kanon}, sesuai master untuk "
+                               f"CUST_ID yang sama; kota diubah otomatis ({kota} -> {kanon}), periksa kembali")
     teks, cands = max(ditemukan.items(), key=lambda kv: len(kv[0]))
     return None, f"Alamat dan kota tidak sesuai (diduga): kecamatan {teks} tidak ada di {kota} (ada di {daftar(cands)})"
 
@@ -801,6 +822,10 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
         kota_n, cat_n = [], []
         for k, a, kamus, k0, cid, dst in zip(df["KOTA_BARU"], df[kol_a], dari_kamus, df["KOTA_ASAL"], cids, dsts):
             cat, diubah = [], False
+            km_master = None   # kota yang sudah tercatat di master untuk CUST_ID + distributor yang sama (bukti tambahan)
+            if cust_kota and cid is not None and not pd.isna(cid):
+                dk0 = "" if dst is None or pd.isna(dst) else str(dst).strip().upper()
+                km_master = cust_kota.get((dk0, str(cid).strip()))
             if not pd.isna(k) and str(k).strip():
                 # Lapis 1: salah ketik terhadap nama resmi pedoman (hasil kamus sudah pasti benar)
                 if not kamus and not kota_resmi(k, pedoman):
@@ -837,15 +862,14 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
                             if c1:
                                 cat.append(c1)
                         if not any(("kecamatan" in x or "KEC." in x or "KEL." in x or "alamat" in x) for x in cat):
-                            kn2, c2 = periksa_kecamatan_kota_pusat(a, k, kec_idx, pedoman)
+                            kn2, c2 = periksa_kecamatan_kota_pusat(a, k, kec_idx, pedoman, bukti_master=km_master)
                             if kn2:
                                 k, diubah = kn2, True   # dikoreksi otomatis; catatan tetap ditulis agar user memeriksa
                             if c2:
                                 cat.append(c2)
                 # Lapis 4: kota yang sudah tercatat di master untuk cust_id yang sama
-                if cust_kota and cid is not None and not pd.isna(cid):
-                    dk = "" if dst is None or pd.isna(dst) else str(dst).strip().upper()
-                    km = cust_kota.get((dk, str(cid).strip()))
+                if km_master:
+                    km = km_master
                     if km and _norm_kab(km) != _norm_kab(k):
                         seg_kota = None if (a is None or pd.isna(a) or kamus) else kota_dari_segmen_alamat(a, pedoman)
                         if seg_kota and _norm_kab(seg_kota) == _norm_kab(km):
