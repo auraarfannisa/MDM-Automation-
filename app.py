@@ -2,6 +2,30 @@
 MDM Automation - Streamlit app (Streamlit Community Cloud + Neon PostgreSQL)
 Jalankan lokal : streamlit run app.py   (DATABASE_URL dari .streamlit/secrets.toml atau variabel lingkungan)
 Deploy         : lihat DEPLOY.md
+
+==============================================================================
+PETA ISI SCRIPT (baca bagian ini dulu bila baru belajar kode ini)
+==============================================================================
+Aplikasi ini merapikan data outlet baru (dari Excel distributor), mencocokkannya dengan data master,
+lalu menyimpan hasilnya ke database. Isi script diurutkan dari bagian dasar ke tampilan:
+
+  MODUL 1   Kota            : kamus alias kota, pembersihan nama kota.
+  MODUL 2   Nama & Segmen   : merapikan nama outlet (PNAMLANG) menjadi pola "NAMA (KOTA), SEGMEN".
+  MODUL 2B  Cocokkan CUST_ID: mencari outlet baru yang ternyata sudah ada di master (nama + alamat mirip).
+  MODUL 3   Mesin MDM       : run_mdm (menjalankan semua tahap), beri_id (membuat ID_STR_OUTLET),
+                              selesaikan (menyusun master akhir), susun_log (catatan perubahan).
+  MODUL 4   Pedoman ID      : kode segmen / provinsi / kab-kota untuk membentuk ID_STR_OUTLET.
+  NEON      Database        : membaca & menulis master, pedoman, riwayat ke PostgreSQL (Neon).
+  EXCEL     Unduhan         : membuat file Excel/CSV dan filter bergaya Excel.
+  UI        Tampilan        : halaman Streamlit. Hanya ada 2 menu:
+              1) "Update Data Baru"  -> page_update  (beranda + Tahap 1 & 2 + data pendukung)
+              2) "Riwayat & Unduh"   -> page_riwayat (riwayat simpan, perubahan outlet, ganti ID,
+                                        koreksi kota, unduhan master, unduhan ID baru)
+
+Format ID_STR_OUTLET : KodeSegmen.KodeProvinsi.KodeKabKota.NomorUrut  (contoh 3.12.45.678)
+Alur kerja pengguna  : unggah Excel -> Tahap 1 (periksa hasil cleansing) -> Tahap 2 (cocokkan dengan master,
+                       putuskan baris yang sama dengan master) -> simpan ke master.
+==============================================================================
 """
 import io
 import re
@@ -14,6 +38,8 @@ import pandas as pd
 
 # ==============================================================================
 # MODUL 1: STANDARDISASI KOTA & KAMUS ALIAS
+# Tujuan: menyeragamkan nama kota. Nama lain/ibu kota kabupaten (mis. SOLO) diganti ke nama resmi (KOTA SURAKARTA).
+# Untuk menambah alias baru, tambahkan satu baris pada KAMUS_17_DAERAH:  "NAMA ALIAS": "NAMA RESMI".
 # ==============================================================================
 KAMUS_17_DAERAH = {
     "SAMPIT": "KAB. KOTAWARINGIN TIMUR", "BATURAJA": "KAB. OGAN KOMERING ULU",
@@ -69,6 +95,8 @@ def clean_viva_dan_daerah(val):
 
 # ==============================================================================
 # MODUL 2: CLEANSING NAMA & SEGMENTASI
+# Tujuan: membuang kata tambahan pada nama outlet (APOTEK, KLINIK PRATAMA, lokasi dalam kurung, dst.)
+# lalu menyusun ulang menjadi pola: NAMA (KOTA), SEGMEN.  SEGMENT_SUFFIX = tabel segmen -> akhiran nama.
 # ==============================================================================
 SEGMENT_SUFFIX = {
     "APT": "APT", "APOTEK": "APT", "KFA": "APT", "INSTANSI": "PT", "PMI": "PMI",
@@ -785,6 +813,8 @@ def rapatkan(df):
 
 # ==============================================================================
 # MODUL 2B: PENCOCOKAN CUST_ID (nama + alamat mirip -> eliminasi, beda -> cek manual)
+# Tujuan: menemukan data baru yang CUST_ID-nya sudah ada di master. Kemiripan dihitung dari nama dan alamat
+# (fungsi sim). Hasilnya TIDAK diputuskan otomatis: tiap baris diputuskan manual di tab 'Penetapan ID Outlet'.
 # ==============================================================================
 from difflib import SequenceMatcher
 
@@ -954,7 +984,7 @@ def cocokkan_cust(df_new, df_lama, cfg, keputusan, cache=None):
                 lain.append(str(v))
         jenis_match = "CUST_ID" if via == "CUST_ID" else "TAIL"
         if ok_n and ok_a:
-            saran = "Mirip: kemungkinan outlet sama (" + ("hapus/perbarui" if jenis_match == "CUST_ID" else "gabung row") + ")"
+            saran = ""   # nama & alamat mirip = bukan anomali, tidak perlu catatan
         else:
             saran = sebab + ": periksa, bisa outlet berbeda"
         rec = {
@@ -995,6 +1025,8 @@ def cocokkan_cust(df_new, df_lama, cfg, keputusan, cache=None):
 
 # ==============================================================================
 # MODUL 3: MDM ENGINE
+# Tujuan: pusat proses. run_mdm menjalankan cleansing -> pencocokan -> deteksi duplikat; beri_id membuat ID;
+# selesaikan menyusun master akhir; susun_log mencatat setiap perubahan.
 # ==============================================================================
 KOLOM_LOG = ["DISTRIBUTOR", "KOCAB", "CABANG_DIST", "CUST_ID", "ID_STR_OUTLET", "PNAMLANG", "PNAMLANG_AKHIR",
              "ALAMAT", "KOTA_BARU", "SEGMENT"]
@@ -1356,6 +1388,7 @@ def run_mdm(df_lama, sheets_baru, df_wilayah=None, timpa_pasangan=False, fallbac
 
 # ==============================================================================
 # MODUL 4: PEDOMAN ID_STR_OUTLET  (Segment.Provinsi.Kab/Kota.Urutan)
+# Tujuan: membaca file pedoman (kode segmen, provinsi, kab/kota) dan memakainya untuk membentuk prefix ID.
 # ==============================================================================
 def _norm_kab(v):
     """Samakan penulisan: KABUPATEN/KAB/KAB. -> 'KAB. ', 'KOTA ADM(INISTRASI)' -> 'KOTA '."""
@@ -1541,7 +1574,7 @@ def beri_id(calon, max_seq, prefix_map, pedoman, known_wil=None):
             elif k in amb:
                 notes.append("Nama kota ganda di pedoman (pastikan provinsinya)")
         else:
-            notes.append("Pedoman ID belum diunggah (menu Pedoman ID)")
+            notes.append("Pedoman ID belum diunggah (buka Update Data Baru > Data pendukung > Pedoman penamaan ID)")
         mp = prefix_map.get((d.at[i, "KOTA_BARU"], d.at[i, "SEGMENT_BARU"]))
         prefix = None
         if sc is not None and wc is not None:
@@ -1950,6 +1983,8 @@ def terapkan_selisih_overrides(selisih, keputusan, ko, no, pm, label_ke_aksi=Non
 
 # ==============================================================================
 # PENYIMPANAN NEON POSTGRESQL (master permanen, pedoman, riwayat)
+# Semua fungsi baca/tulis database ada di sini. Penyimpanan hasil update dibuat INKREMENTAL
+# (hanya baris yang berubah/baru) dalam satu transaksi: bila gagal di tengah, semua perubahan dibatalkan.
 # ==============================================================================
 import hashlib
 import os
@@ -2236,6 +2271,7 @@ def simpan_update(df_final, df_asli, df_log, nama_file, hash_file, ringkasan, ba
 
 # ==============================================================================
 # EXCEL
+# Pembuat file Excel unduhan. xlsxwriter dipakai bila terpasang (lebih cepat untuk puluhan ribu baris).
 # ==============================================================================
 def _engine():
     try:
@@ -2274,6 +2310,7 @@ def nama_file_master():
 
 # ------------------------------------------------------------------------------
 # FILTER BERGAYA EXCEL (dipakai di beberapa tabel) + EKSPOR HASIL FILTER
+# filter_excel = antarmuka filter (kolom + kondisi + nilai). tampil_filter_export = filter + pratinjau + unduhan.
 # ------------------------------------------------------------------------------
 OP_FILTER = {
     "pilih nilai (daftar)": "daftar", "mengandung": "has", "tidak mengandung": "nothas", "sama dengan": "eq",
@@ -2431,6 +2468,8 @@ def master_cached(st):
 
 # ==============================================================================
 # UI STREAMLIT
+# Bagian tampilan. Urutan fungsi: tampil_beranda -> page_update (Tahap 1 & 2) -> page_pedoman, page_wilayah,
+# page_inisialisasi (data pendukung) -> page_riwayat (riwayat & unduhan) -> main (menu).
 # ==============================================================================
 def siapkan_master_std(df):
     """Pastikan master punya KOTA_BARU, SEGMENT_BARU, PNAMLANG_AKHIR (dibuat dari kolom mentah bila belum ada)."""
@@ -2648,6 +2687,19 @@ def _tt(v):
     return "" if s_ is None else s_
 
 
+# Catatan yang hanya berupa pemberitahuan "sudah dibetulkan otomatis dengan bukti kuat" TIDAK ditampilkan di
+# kolom CATATAN PEMERIKSAAN, agar pengguna hanya melihat baris yang benar-benar anomali.
+# Catatan seperti "diubah otomatis", "salah ketik", "alamat tidak sesuai" tetap tampil karena perlu dicek manual.
+CATATAN_INFO_SAJA = ("Kota ditentukan dari", "Segmen kosong, diisi dari CHANNEL OUTLET")
+
+
+def hanya_anomali(catatan):
+    """Buang bagian catatan yang hanya informasi (lihat CATATAN_INFO_SAJA); sisakan yang perlu dicek."""
+    if catatan is None or pd.isna(catatan) or not str(catatan):
+        return ""
+    return "; ".join(x for x in str(catatan).split("; ") if x and not x.startswith(CATATAN_INFO_SAJA))
+
+
 def catatan_cleansing(cl, pedoman):
     """CATATAN_CEK tahap 1: masalah pada kota, segmen, dan nama hasil cleansing."""
     seg_map = pedoman["seg"] if pedoman else {}
@@ -2676,10 +2728,9 @@ def catatan_cleansing(cl, pedoman):
         kotor = cek_nama_kotor(n)
         if kotor:
             notes.append("Nama masih kotor: " + "; ".join(kotor))
-        if _t(ck):
-            notes.append(ck)
-        if _t(cs):
-            notes.append(cs)
+        for c_ in (hanya_anomali(ck), hanya_anomali(cs)):   # hanya anomali yang ditampilkan
+            if c_:
+                notes.append(c_)
         out.append("; ".join(notes))
     return pd.Series(out, index=cl.index, dtype=object)
 
@@ -2751,7 +2802,7 @@ def tampil_cleansing(st):
     if nk_ or nh_:
         st.info(f"Dibersihkan otomatis sebelum cleansing: {nh_:,} baris header ganda dan {nk_:,} baris kosong dibuang.")
     if not pedoman:
-        st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). Kota dan segmen tidak dapat divalidasi.")
+        st.warning("Pedoman ID belum diunggah (buka Update Data Baru > Data pendukung > Pedoman penamaan ID). Kota dan segmen tidak dapat divalidasi.")
     t_full = tabel_cleansing(cl, kol, pedoman)
     n_kt = sum(1 for n_ in cl["PNAMLANG_AKHIR"] if cek_nama_kotor(n_))
     if n_kt:
@@ -2848,10 +2899,34 @@ def cocokkan_kolom(kolom_baru, jenis, kol_master):
                  f"Pastikan kedua kolom memuat data yang sama.")
 
 
-def page_update(st):
+def tampil_beranda(st):
+    """Halaman awal yang ringkas: penjelasan singkat + data pendukung (dibuka hanya bila dibutuhkan)."""
     st.subheader("Update Data Baru")
+    st.write("Aplikasi ini merapikan data outlet baru, lalu memasukkannya ke data master dengan aman.")
+    with st.expander("Cara memakai (4 langkah)"):
+        st.markdown(
+            "1. **Unggah** file Excel data outlet baru.\n"
+            "2. **Tahap 1 - Periksa kerapian**: nama, kota, dan segmen dirapikan otomatis. Cek hanya baris yang diberi catatan.\n"
+            "3. **Tahap 2 - Cocokkan dengan master**: putuskan outlet yang ternyata sudah ada (ID baru / gabung / hapus).\n"
+            "4. **Simpan** ke master. Hasilnya bisa dilihat di menu *Riwayat & Unduh*.")
+    with st.expander("Data pendukung (jarang diubah)"):
+        st.caption("Dibuka hanya bila Anda perlu menyiapkan atau mengubah data acuan.")
+        pilih = st.radio("Pilih salah satu", ["Pedoman penamaan ID", "Daftar wilayah", "Master awal (isi pertama kali)"],
+                         index=None, horizontal=True, key="pendukung_pilih")
+        if pilih == "Pedoman penamaan ID":
+            page_pedoman(st)
+        elif pilih == "Daftar wilayah":
+            page_wilayah(st)
+        elif pilih == "Master awal (isi pertama kali)":
+            page_inisialisasi(st)
+
+
+def page_update(st):
+    """Menu 1: beranda + alur Update Data Baru (unggah -> Tahap 1 -> Tahap 2 -> simpan)."""
+    tampil_beranda(st)
+    st.divider()
     if not db_ready():
-        st.warning("Master belum ada di database. Buka menu 'Inisialisasi master' terlebih dahulu.")
+        st.warning("Master belum ada di database. Buka 'Data pendukung > Master awal' di halaman ini terlebih dahulu.")
         return
     n, last = master_info()
     c1, c2, c3 = st.columns(3)
@@ -2859,7 +2934,7 @@ def page_update(st):
     c2.metric("Update terakhir", last[1][:16] if last else "-")
     c3.metric("Versi", last[0] if last else 0)
     if load_pedoman() is None:
-        st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). Tanpa pedoman, kota/segmen baru tidak bisa diberi ID.")
+        st.warning("Pedoman ID belum diunggah (buka Update Data Baru > Data pendukung > Pedoman penamaan ID). Tanpa pedoman, kota/segmen baru tidak bisa diberi ID.")
 
     f_baru = st.file_uploader("Upload data baru (.xlsx)", type=["xlsx"])
     timpa, fallback = False, ""
@@ -3042,7 +3117,7 @@ def tampil_hasil_update(st):
     idb, idt = res.get("id_berubah", pd.DataFrame()), res.get("id_tetap", pd.DataFrame())
     if len(idb):
         st.warning(f"**{len(idb)} outlet master akan berganti ID_STR_OUTLET** saat disimpan (kota/segmen berubah). "
-                   "Pastikan sistem lain yang memakai ID lama ikut diperbarui. Riwayatnya tercatat di menu 'Riwayat Perubahan ID'.")
+                   "Pastikan sistem lain yang memakai ID lama ikut diperbarui. Riwayatnya tercatat di menu Riwayat & Unduh > Riwayat ganti ID.")
         with st.expander("Daftar ID yang berganti"):
             st.dataframe(idb[["ID_LAMA", "ID_BARU", "SEBAB", "PNAMLANG_LAMA", "PNAMLANG_BARU", "JML_ROW", "CUST_ID_BARU"]],
                          hide_index=True, width="stretch")
@@ -3261,7 +3336,7 @@ def tampil_hasil_update(st):
 
     if tab == "review":
         if not st.session_state.get("pedoman"):
-            st.warning("Pedoman ID belum diunggah (menu 'Pedoman ID'). ID hanya bisa dibuat dari prefix master.")
+            st.warning("Pedoman ID belum diunggah (buka Update Data Baru > Data pendukung > Pedoman penamaan ID). ID hanya bisa dibuat dari prefix master.")
         with st.expander("Petunjuk Pemeriksaan dan Pembersihan Data"):
             st.markdown(PETUNJUK_REVIEW)
         rr = rv[~ada_master]
@@ -3614,58 +3689,167 @@ def page_wilayah(st):
         st.success(f"Master wilayah tersimpan: {len(d):,} baris.")
 
 
-def page_pedoman(st):
-    st.subheader("Pedoman ID_STR_OUTLET")
-    st.caption("Format ID: KodeSegmen.KodeProvinsi.KodeKab/Kota.NomorUrut (urut alfabet; ID baru melanjutkan nomor tertinggi). "
-               "Unggah file Pedoman Penamaan Outlet; tabel segmen, provinsi, dan kab/kota dibaca otomatis.")
-    p = load_pedoman()
-    if p:
-        st.success(f"Pedoman tersimpan: {len(p['seg'])} segmen, {p['n_prov']} provinsi, {p['n_wil']} kab/kota.")
-    else:
-        st.warning("Belum ada pedoman tersimpan.")
+def load_pedoman_tabel():
+    """Tabel pedoman apa adanya dari database: (tabel segmen, tabel wilayah), atau (None, None) bila belum ada."""
+    insp = inspect(engine())
+    if not (insp.has_table("pedoman_segment") and insp.has_table("pedoman_wilayah")):
+        return None, None
+    return (pd.read_sql(text("SELECT * FROM pedoman_segment"), engine()),
+            pd.read_sql(text("SELECT * FROM pedoman_wilayah"), engine()))
+
+
+def _cek_pedoman(seg, wil):
+    """Periksa pedoman hasil edit. Kembalikan (segmen bersih, wilayah bersih, daftar masalah).
+    Selama masih ada masalah, pedoman tidak boleh disimpan."""
+    masalah = []
+    seg, wil = seg.dropna(how="all").copy(), wil.dropna(how="all").copy()
+    for d, teks, kode in ((seg, ["SEGMENT"], ["KODE_SEGMENT"]),
+                          (wil, ["PROVINSI", "KAB_KOTA"], ["KODE_PROVINSI", "KODE_KAB_KOTA"])):
+        for c in teks:
+            d[c] = d[c].map(_t).str.strip().str.upper()
+        for c in kode:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+    kurang_s = (seg["SEGMENT"] == "") | seg["KODE_SEGMENT"].isna()
+    kurang_w = ((wil["PROVINSI"] == "") | (wil["KAB_KOTA"] == "")
+                | wil["KODE_PROVINSI"].isna() | wil["KODE_KAB_KOTA"].isna())
+    if kurang_s.any():
+        masalah.append(f"{int(kurang_s.sum())} baris segmen belum lengkap (nama atau kode kosong / kode bukan angka).")
+    if kurang_w.any():
+        masalah.append(f"{int(kurang_w.sum())} baris wilayah belum lengkap (nama atau kode kosong / kode bukan angka).")
+    if seg["SEGMENT"].duplicated().any():
+        masalah.append("Nama segmen muncul lebih dari sekali: " + ", ".join(sorted(set(seg.loc[seg["SEGMENT"].duplicated(), "SEGMENT"]))[:5]))
+    if not masalah:
+        for d, kode in ((seg, ["KODE_SEGMENT"]), (wil, ["KODE_PROVINSI", "KODE_KAB_KOTA"])):
+            for c in kode:
+                d[c] = d[c].astype(int)
+    return seg, wil, masalah
+
+
+def _unggah_pedoman(st):
+    """Cara kedua mengisi pedoman: unggah file Excel Pedoman Penamaan Outlet (dibaca oleh parse_pedoman)."""
     f = st.file_uploader("File pedoman (.xlsx)", type=["xlsx"], key="pedoman_up")
-    if f:
-        try:
-            seg, wil = parse_pedoman(f.getvalue())
-        except Exception as e:
-            st.error(f"Gagal membaca pedoman: {e}")
-            return
-        st.write(f"Terbaca: {len(seg)} segmen, {wil['KODE_PROVINSI'].nunique()} provinsi, {len(wil)} kab/kota.")
-        c1, c2 = st.columns(2)
-        c1.dataframe(seg, width="stretch")
-        c2.dataframe(wil, width="stretch", height=300)
-        if st.button("Simpan pedoman", type="primary"):
-            save_pedoman(seg, wil)
-            st.success("Pedoman tersimpan.")
+    if not f:
+        return
+    try:
+        seg, wil = parse_pedoman(f.getvalue())
+    except Exception as e:
+        st.error(f"Gagal membaca pedoman: {e}")
+        return
+    st.write(f"Terbaca: {len(seg)} segmen, {wil['KODE_PROVINSI'].nunique()} provinsi, {len(wil)} kab/kota.")
+    c1, c2 = st.columns(2)
+    c1.dataframe(seg, width="stretch")
+    c2.dataframe(wil, width="stretch", height=300)
+    st.warning("Menyimpan akan MENGGANTI seluruh pedoman yang ada.")
+    if st.button("Simpan pedoman dari file", type="primary"):
+        save_pedoman(seg, wil)
+        st.session_state["pedoman_ver"] = st.session_state.get("pedoman_ver", 0) + 1
+        st.success("Pedoman tersimpan.")
+
+
+def page_pedoman(st):
+    """Pedoman penamaan ID: tampil sebagai tabel yang bisa langsung diedit (ubah, tambah, hapus baris)."""
+    st.markdown("#### Pedoman penamaan ID outlet")
+    st.caption("Pedoman berisi kode untuk membentuk ID outlet: **Kode Segmen . Kode Provinsi . Kode Kab/Kota . Nomor urut**. "
+               "Anda bisa melihat, mengubah, menambah, atau menghapus isinya di sini.")
+    mode = st.radio("Pilih tindakan", ["Lihat & ubah pedoman", "Unggah file pedoman baru"], horizontal=True, key="pedoman_mode")
+    if mode == "Unggah file pedoman baru":
+        _unggah_pedoman(st)
+        return
+    seg0, wil0 = load_pedoman_tabel()
+    if seg0 is None or seg0.empty or wil0 is None or wil0.empty:
+        st.warning("Belum ada pedoman tersimpan. Pilih 'Unggah file pedoman baru' untuk mengisi pertama kali.")
+        return
+    ver = st.session_state.get("pedoman_ver", 0)   # naik tiap kali disimpan, supaya tabel editor dimuat ulang
+    st.info("Mengubah kode di pedoman hanya berlaku untuk ID BARU. ID outlet yang sudah ada di master tidak ikut berubah.")
+    t1, t2 = st.tabs(["Segmen", "Provinsi & Kab/Kota"])
+    with t1:
+        seg_e = st.data_editor(seg0, num_rows="dynamic", hide_index=True, width="stretch", key=f"ped_seg_{ver}")
+    with t2:
+        cari = st.text_input("Cari cepat (nama provinsi atau kab/kota)", key=f"ped_cari_{ver}")
+        if cari.strip():
+            q = cari.strip().upper()
+            hit = wil0[wil0["PROVINSI"].astype(str).str.upper().str.contains(q, regex=False)
+                       | wil0["KAB_KOTA"].astype(str).str.upper().str.contains(q, regex=False)]
+            st.caption(f"{len(hit)} hasil (hanya untuk dilihat; edit dilakukan di tabel bawah).")
+            st.dataframe(hit, hide_index=True, width="stretch")
+        wil_e = st.data_editor(wil0, num_rows="dynamic", hide_index=True, width="stretch", height=400, key=f"ped_wil_{ver}")
+    seg_b, wil_b, masalah = _cek_pedoman(seg_e, wil_e)
+    for m in masalah:
+        st.error(m)
+    ada_ubah = not (seg_e.fillna("").astype(str).equals(seg0.fillna("").astype(str))
+                    and wil_e.fillna("").astype(str).equals(wil0.fillna("").astype(str)))
+    if st.button("Simpan perubahan pedoman", type="primary", disabled=bool(masalah) or not ada_ubah):
+        save_pedoman(seg_b, wil_b)
+        st.session_state["pedoman_ver"] = ver + 1
+        st.success("Pedoman tersimpan.")
+        st.rerun()
+
+
+def load_log_perubahan(limit=3000):
+    """Catatan perubahan per outlet (ID baru, gabung, hapus, ganti ID, dst.) dari semua penyimpanan."""
+    d = pd.read_sql(text("SELECT l.id, r.waktu, l.batch_id, r.nama_file, l.jenis, l.id_str_outlet, l.detail "
+                         "FROM log_perubahan l LEFT JOIN riwayat_batch r ON r.id = l.batch_id "
+                         "ORDER BY l.id DESC LIMIT :n"), engine(), params={"n": int(limit)})
+    d["waktu"] = d["waktu"].map(lambda v: "" if pd.isna(v) else _wib_str(v))
+    return d
+
+
+def load_koreksi_kota(limit=3000):
+    """Koreksi kota manual oleh pengguna (dipakai sistem sebagai petunjuk untuk data berikutnya)."""
+    d = pd.read_sql(text("SELECT id, waktu, kota_asal, kota_oto, kota_baru, distributor, nama_file FROM koreksi_kota "
+                         "ORDER BY id DESC LIMIT :n"), engine(), params={"n": int(limit)})
+    d["waktu"] = d["waktu"].map(lambda v: "" if pd.isna(v) else _wib_str(v))
+    return d
 
 
 def page_riwayat(st):
-    st.subheader("Riwayat & unduh master")
+    """Menu 2: semua riwayat dan unduhan, dipecah per jenis. Hanya bagian yang dipilih yang dijalankan (lebih cepat)."""
+    st.subheader("Riwayat & Unduh")
     if not db_ready():
         st.info("Belum ada data.")
         return
-    st.write("**Riwayat**")
-    st.dataframe(load_riwayat(), width="stretch")
+    bagian = st.radio("Pilih bagian", [
+        "Riwayat penyimpanan", "Riwayat perubahan per outlet", "Riwayat ganti ID", "Riwayat koreksi kota",
+        "Unduh master", "Unduh outlet ber-ID baru"], horizontal=True, key="riwayat_bagian")
 
-    st.write("**Unduh master (filter seperti Excel)**")
-    st.caption("Tambahkan kondisi filter per kolom (daftar nilai, mengandung, kosong, angka, dan seterusnya), "
-               "lalu siapkan file dari hasil filternya.")
-    tampil_filter_export(st, rapatkan(master_cached(st)), "mst", "MASTER")
+    if bagian == "Riwayat penyimpanan":
+        st.caption("Setiap data disimpan ke master, satu baris tercatat di sini (kapan, file apa, ringkasannya).")
+        st.dataframe(load_riwayat(), hide_index=True, width="stretch")
 
-    st.write("**Unduh data yang mendapat ID baru**")
-    bt = daftar_batch_update()
-    if bt.empty:
-        st.caption("Belum ada update yang tersimpan.")
-    else:
-        opsi = [None] + list(bt["id"])
-        info = {r.id: f"Update #{r.id} - {r.waktu[:16]} - {r.nama_file}" for r in bt.itertuples()}
-        pilih = st.selectbox(
-            "Ambil dari", opsi, index=1,
-            format_func=lambda b: "Semua update" if b is None else info[b] + (" (terbaru)" if b == bt["id"].iloc[0] else ""))
-        df_id = load_id_baru(pilih)
-        st.caption(f"{len(df_id):,} baris master dengan ID baru. Baris yang digabung ke outlet lama tidak termasuk.")
-        if len(df_id):
-            tampil_filter_export(st, rapatkan(df_id), f"idb{pilih}", "ID_BARU")
+    elif bagian == "Riwayat perubahan per outlet":
+        st.caption("Rincian yang terjadi pada tiap outlet: ID baru, gabung, hapus, nama diperbarui, ID berganti, dan lainnya.")
+        tampil_filter_export(st, load_log_perubahan(), "riw_log", "RIWAYAT_PERUBAHAN_OUTLET")
+
+    elif bagian == "Riwayat ganti ID":
+        page_riwayat_id(st)
+
+    elif bagian == "Riwayat koreksi kota":
+        st.caption("Kota yang Anda koreksi manual pada Tahap 1. Sistem memakainya sebagai petunjuk untuk data berikutnya.")
+        kk = load_koreksi_kota()
+        if kk.empty:
+            st.info("Belum ada koreksi kota yang tercatat.")
+        else:
+            tampil_filter_export(st, kk, "riw_kota", "RIWAYAT_KOREKSI_KOTA")
+
+    elif bagian == "Unduh master":
+        st.caption("Tambahkan kondisi filter per kolom (daftar nilai, mengandung, kosong, angka, dan seterusnya), "
+                   "lalu siapkan file dari hasil filternya.")
+        tampil_filter_export(st, rapatkan(master_cached(st)), "mst", "MASTER")
+
+    else:   # Unduh outlet ber-ID baru
+        bt = daftar_batch_update()
+        if bt.empty:
+            st.caption("Belum ada update yang tersimpan.")
+        else:
+            opsi = [None] + list(bt["id"])
+            info = {r.id: f"Update #{r.id} - {r.waktu[:16]} - {r.nama_file}" for r in bt.itertuples()}
+            pilih = st.selectbox(
+                "Ambil dari", opsi, index=1,
+                format_func=lambda b: "Semua update" if b is None else info[b] + (" (terbaru)" if b == bt["id"].iloc[0] else ""))
+            df_id = load_id_baru(pilih)
+            st.caption(f"{len(df_id):,} baris master dengan ID baru. Baris yang digabung ke outlet lama tidak termasuk.")
+            if len(df_id):
+                tampil_filter_export(st, rapatkan(df_id), f"idb{pilih}", "ID_BARU")
 
     st.caption("Backup & pemulihan data ditangani Neon (Dashboard > Restore / branch). Disarankan juga pg_dump berkala.")
 
@@ -3743,7 +3927,8 @@ def load_kota_berubah_id_tetap():
 
 
 def page_riwayat_id(st):
-    st.subheader("Riwayat Perubahan ID")
+    """Riwayat ID_STR_OUTLET: (1) ID yang berganti, (2) nomor ID yang kosong, (3) ID tidak sesuai kota/segmen."""
+    st.markdown("#### Riwayat ganti ID outlet")
     if not db_ready():
         st.info("Belum ada data.")
         return
@@ -3809,10 +3994,11 @@ def main():
         st.error(f"Tidak dapat terhubung ke database Neon: {e}")
         st.info("Periksa DATABASE_URL di Settings > Secrets (harus memuat ?sslmode=require).")
         st.stop()
-    menu = st.sidebar.radio("Menu", ["Update Data Baru", "Inisialisasi master", "Pedoman ID", "Master Wilayah", "Riwayat Perubahan ID", "Riwayat & unduh"])
+    # Hanya 2 menu utama. Pedoman, wilayah, dan master awal ada di "Update Data Baru > Data pendukung";
+    # riwayat ganti ID dan riwayat lainnya ada di "Riwayat & Unduh".
+    menu = st.sidebar.radio("Menu", ["Update Data Baru", "Riwayat & Unduh"])
     st.sidebar.caption("Database: Neon PostgreSQL")
-    {"Update Data Baru": page_update, "Inisialisasi master": page_inisialisasi, "Pedoman ID": page_pedoman,
-     "Master Wilayah": page_wilayah, "Riwayat Perubahan ID": page_riwayat_id, "Riwayat & unduh": page_riwayat}[menu](st)
+    {"Update Data Baru": page_update, "Riwayat & Unduh": page_riwayat}[menu](st)
 
 
 if __name__ == "__main__":
