@@ -445,6 +445,17 @@ def kota_pusat_distributor(kota):
 # otomatis (catatan tetap ditulis agar user memeriksa). False: hanya catatan berisi kota yang disarankan.
 KOREKSI_OTOMATIS_KOTA = True
 
+# Tingkat keyakinan perubahan kota otomatis. Perubahan yang buktinya KUAT diberi awalan TAG_OTO. Catatannya TIDAK
+# ditampilkan sebagai peringatan di kolom CATATAN PEMERIKSAAN (supaya pengguna tidak memeriksa yang sudah hampir pasti),
+# tetapi dicatat di kolom terpisah PERUBAHAN_OTOMATIS agar tetap bisa ditelusuri.
+# Keyakinan TINGGI (disembunyikan dari peringatan): dua bukti yang saling menguatkan, yaitu
+#   (a) kecamatan/kelurahan di alamat ada di kota X DAN master mencatat kota X untuk CUST_ID yang sama;
+#   (b) penanda 'KEC. X' di alamat tidak ada di kota tertulis, hanya ada di satu kab/kota, dan provinsinya sama / kelurahan cocok;
+#   (c) aturan yang Anda tetapkan sendiri (alamat memuat KUTA + kota Denpasar -> KAB. BADUNG).
+# Keyakinan SEDANG (tetap jadi peringatan): bukti tunggal, mis. salah ketik terdekat, kota tertulis eksplisit di alamat,
+# hanya kelurahan/desa yang cocok.
+TAG_OTO = "[OTO] "
+
 _RX_KEL = re.compile(
     r"\b(?:KEL(?:URAHAN)?|DESA)\.?\s+([A-Z0-9][A-Z0-9 .']*?)"
     r"(?=\s+(?:KEC(?:AMATAN)?|KAB(?:UPATEN)?|KOTA|PROV(?:INSI)?|RT|RW|NO)\b|\s*[,;()/]|$)")
@@ -510,13 +521,13 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None, bukti_mast
         bm = _norm_kab(bukti_master) if bukti_master else ""
         if bm and bm in narrowed and KOREKSI_OTOMATIS_KOTA:      # alamat + master menunjuk kota yang sama
             kanon = kanonik_kota(bm, pedoman)
-            return kanon, f"{dasar}; kota diubah otomatis ({kota} -> {kanon}), periksa kembali"
+            return kanon, TAG_OTO + f"{dasar}; kota diubah otomatis ({kota} -> {kanon})"
         if len(narrowed) == 1:
             kab = next(iter(narrowed))
             kuat = via_kel or bool(prov.get(kab, set()) & prov_k)
             kanon = kanonik_kota(kab, pedoman)
             if kuat and KOREKSI_OTOMATIS_KOTA:
-                return kanon, f"{dasar}; kota diubah otomatis ({kota} -> {kanon}), periksa kembali"
+                return kanon, TAG_OTO + f"{dasar}; kota diubah otomatis ({kota} -> {kanon})"
             return None, f"{dasar}; kota yang disarankan: {kanon}. Pilih KOTA_BARU yang benar"
         return None, f"{dasar}; ada di: {daftar(narrowed)}. Pilih KOTA_BARU secara manual"
     mk = _RX_KEL.search(a)
@@ -535,7 +546,7 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None, bukti_mast
             bm = _norm_kab(bukti_master) if bukti_master else ""
             if bm and bm in kab_set and KOREKSI_OTOMATIS_KOTA:
                 kanon = kanonik_kota(bm, pedoman)
-                return kanon, f"{dasar}; kota diubah otomatis ({kota} -> {kanon}), periksa kembali"
+                return kanon, TAG_OTO + f"{dasar}; kota diubah otomatis ({kota} -> {kanon})"
             if len(kab_set) == 1:
                 kab = next(iter(kab_set))
                 kanon = kanonik_kota(kab, pedoman)
@@ -565,8 +576,8 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None, bukti_mast
         for teks_, cands_ in ditemukan.items():
             if bm in cands_:
                 kanon = kanonik_kota(bm, pedoman)
-                return kanon, (f"Alamat dan kota tidak sesuai (diduga): kecamatan {teks_} ada di {kanon}, sesuai master untuk "
-                               f"CUST_ID yang sama; kota diubah otomatis ({kota} -> {kanon}), periksa kembali")
+                return kanon, (TAG_OTO + f"Alamat dan kota tidak sesuai (diduga): kecamatan {teks_} ada di {kanon}, sesuai master untuk "
+                               f"CUST_ID yang sama; kota diubah otomatis ({kota} -> {kanon})")
     teks, cands = max(ditemukan.items(), key=lambda kv: len(kv[0]))
     return None, f"Alamat dan kota tidak sesuai (diduga): kecamatan {teks} tidak ada di {kota} (ada di {daftar(cands)})"
 
@@ -809,7 +820,8 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
     df["KOTA_ASAL"] = pick(df, "KOTA", "KOTA_CLEAN")          # kota sebelum cleansing
     df["KOTA_BARU"] = pick(df, "KOTA_CLEAN", "KOTA").apply(clean_viva_dan_daerah).apply(lambda v: kanonik_kota(v, pedoman))
     # Kota masih generik (mis. JAKARTA): tentukan dari kecamatan di alamat memakai master wilayah
-    df["_CAT_KEC"] = ""
+    df["_CAT_KEC"] = ""     # catatan yang perlu diperiksa (anomali)
+    df["_CAT_OTO"] = ""     # perubahan otomatis berkeyakinan tinggi (hanya untuk ditelusuri)
     df["_KOTA_OTO"] = df["KOTA_BARU"]
     kol_a = kol_alamat if (kol_alamat and kol_alamat in df.columns) else deteksi_kolom(df, "alamat")
     if pedoman and kol_a:
@@ -819,7 +831,7 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
         dsts = df[kol_d] if kol_d else [None] * n_
         dari_kamus = pick(df, "KOTA_CLEAN", "KOTA").map(kota_dari_kamus)   # kota sudah diganti lewat KAMUS_17_DAERAH
         memo_typo = {}
-        kota_n, cat_n = [], []
+        kota_n, cat_n, oto_n = [], [], []
         for k, a, kamus, k0, cid, dst in zip(df["KOTA_BARU"], df[kol_a], dari_kamus, df["KOTA_ASAL"], cids, dsts):
             cat, diubah = [], False
             km_master = None   # kota yang sudah tercatat di master untuk CUST_ID + distributor yang sama (bukti tambahan)
@@ -837,7 +849,7 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
                 # Aturan khusus: alamat memuat KUTA tetapi kota tertulis DENPASAR -> yang benar KAB. BADUNG
                 if (not pd.isna(a) and not kamus and kunci_wilayah(k)[1] == "DENPASAR"
                         and re.search(r"\bKUTA\b", str(a).upper())):
-                    cat.append(f"Alamat memuat KUTA, kota {k} diubah otomatis ke KAB. BADUNG, periksa kembali")
+                    cat.append(TAG_OTO + f"Alamat memuat KUTA, kota {k} diubah otomatis ke KAB. BADUNG")
                     k, diubah = kanonik_kota("KAB. BADUNG", pedoman), True
                 if not pd.isna(a) and not kamus:
                     # Lapis 2a: kab/kota tertulis eksplisit di alamat (KAB. X / KOTA X)
@@ -874,7 +886,7 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
                         seg_kota = None if (a is None or pd.isna(a) or kamus) else kota_dari_segmen_alamat(a, pedoman)
                         if seg_kota and _norm_kab(seg_kota) == _norm_kab(km):
                             # dua bukti sejalan (alamat + master untuk cust_id yang sama): koreksi otomatis
-                            cat.append(f"Alamat dan master sama-sama menunjuk {_norm_kab(km)}; kota diubah otomatis ({k} -> {_norm_kab(km)}), periksa kembali")
+                            cat.append(TAG_OTO + f"Alamat dan master sama-sama menunjuk {_norm_kab(km)}; kota diubah otomatis ({k} -> {_norm_kab(km)})")
                             k, diubah = _norm_kab(km), True
                         else:
                             cat.append(f"CUST_ID ini sudah ada di master dengan kota {_norm_kab(km)}; periksa")
@@ -883,10 +895,14 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
                     c3 = catatan_riwayat_kota(k0, k, riwayat)
                     if c3:
                         cat.append(c3)
+            # pisahkan: keyakinan tinggi -> kolom PERUBAHAN_OTOMATIS; sisanya -> CATATAN PEMERIKSAAN
+            oto_n.append("; ".join(x[len(TAG_OTO):] for x in cat if x.startswith(TAG_OTO)))
+            cat = [x for x in cat if not x.startswith(TAG_OTO)]
             kota_n.append(k)
             cat_n.append("; ".join(cat))
         df["KOTA_BARU"] = pd.Series(kota_n, index=df.index, dtype=object)
         df["_CAT_KEC"] = pd.Series(cat_n, index=df.index, dtype=object)
+        df["_CAT_OTO"] = pd.Series(oto_n, index=df.index, dtype=object)
     df["PNAMLANG_ASAL"] = pick(df, "PNAMLANG", "PNAMLANG_CLEAN")  # nama sebelum cleansing
     nama = pick(df, "PNAMLANG_CLEAN", "PNAMLANG")
     seg = pick(df, "SEGMENT_CLEAN", "SEGMENT")
@@ -2865,6 +2881,7 @@ def tabel_cleansing(cl, kol, pedoman):
     t = pd.DataFrame({
         "CATATAN_CEK": cat_,
         "JENIS_MASALAH": cat_.map(lambda c: kategori_masalah(c)[2]),
+        "PERUBAHAN_OTOMATIS": cl["_CAT_OTO"] if "_CAT_OTO" in cl.columns else "",   # keyakinan tinggi: info saja, bukan peringatan
         "PNAMLANG_ASAL": cl["PNAMLANG_ASAL"],
         "PNAMLANG_AKHIR": cl["PNAMLANG_AKHIR"],
         "ALAMAT": kolom("alamat"),
@@ -2894,6 +2911,8 @@ def terapkan_edit_cleansing(cl, ed):
             continue
         if k_new != k_old:
             d.at[i, "_CAT_KEC"] = ""
+            if "_CAT_OTO" in d.columns:
+                d.at[i, "_CAT_OTO"] = ""   # kota sudah diputuskan manual; info perubahan otomatis tidak relevan lagi
         if s_new != s_old:
             d.at[i, "_CAT_SEG"] = ""   # segmen sudah diputuskan manual; catatan channel tidak relevan lagi
         d.at[i, "KOTA_BARU"] = k_new or None
@@ -2908,6 +2927,62 @@ def terapkan_edit_cleansing(cl, ed):
 
 def cl_base_val(df, i, kol):
     return df.at[i, kol]
+
+
+# ------------------------------------------------------------------------------
+# TAHAP 1 DIBAGI PER KELOMPOK (container). Setiap baris masuk ke SATU kelompok sesuai jenis masalah utamanya
+# (lihat KATEGORI_MASALAH), ditambah dua kelompok informasi: perubahan kota otomatis berbukti kuat, dan data bersih.
+# Tiap kelompok punya penjelasan/peringatan sendiri supaya pengguna tahu apa yang harus dilakukan di kelompok itu.
+# ------------------------------------------------------------------------------
+GRUP_OTO = "Kota diubah otomatis (bukti kuat, info saja)"
+GRUP_BERSIH = "Data bersih (tanpa catatan)"
+GRUP_URUT = list(dict.fromkeys([lab for _, lab, _ in KATEGORI_MASALAH] + ["Catatan lain", GRUP_OTO, GRUP_BERSIH]))
+LEVEL_GRUP = {**{lab: sk for sk, lab, _ in KATEGORI_MASALAH}, "Catatan lain": 1, GRUP_OTO: 0, GRUP_BERSIH: 0}
+IKON_LEVEL = {3: "🔴", 2: "🟠", 1: "🟡", 0: "🟢"}
+
+
+def ikon_grup(label):
+    """Ikon kelompok: merah/oranye/kuning menurut level; biru = kota diubah otomatis (info); hijau = bersih."""
+    return "🔵" if label == GRUP_OTO else IKON_LEVEL[LEVEL_GRUP.get(label, 1)]
+PETUNJUK_GRUP = {
+    "Kota diubah otomatis": "Sistem mengganti kota dengan satu bukti (mis. alamat menyebut kota lain). Pastikan kota barunya benar; "
+                            "bila salah, pilih kota yang benar di kolom KOTA_BARU.",
+    "Kota diduga salah ketik": "Nama kota mirip dengan satu kota resmi, sehingga diperbaiki otomatis. Cek bahwa perbaikannya tepat.",
+    "Alamat tidak sesuai kota": "Kecamatan atau kota di alamat tidak cocok dengan kota yang tertulis, tetapi sistem belum cukup yakin untuk mengubahnya. "
+                                "Periksa alamat lalu pilih KOTA_BARU yang benar.",
+    "CUST_ID sudah ada di master dengan kota lain": "CUST_ID ini sudah tercatat di master dengan kota berbeda. Pastikan outlet yang sama atau perbaiki kotanya.",
+    "Kota harus dipilih manual": "Sistem tidak bisa menentukan kota (ada beberapa kemungkinan). Pilih KOTA_BARU dari daftar.",
+    "Riwayat koreksi kota": "Kota asal ini pernah Anda koreksi sebelumnya ke kota lain (lihat catatan). Cek apakah koreksi yang sama berlaku.",
+    "Segmen tidak sesuai CHANNEL OUTLET": "Segmen di data berbeda dengan hasil konversi CHANNEL OUTLET (lihat kolom CHANNEL_OUTLET). Pilih SEGMENT_BARU yang benar.",
+    "Nama kosong": "Nama outlet kosong. Isi PNAMLANG_AKHIR secara manual.",
+    "Nama masih kotor": "Nama masih memuat tanda atau kata yang tidak lazim. Rapikan PNAMLANG_AKHIR (pola: NAMA (KOTA), SEGMEN).",
+    "Segmen kosong / tidak ada di pedoman": "Segmen kosong atau tidak dikenal pedoman, sehingga ID belum bisa dibuat. Pilih SEGMENT_BARU.",
+    "Kota ditentukan dari alamat": "Kota ditentukan dari teks alamat. Cukup dicek sekilas.",
+    "Kota kosong / bukan nama resmi pedoman": "Kota kosong atau belum berupa nama resmi di pedoman. Pilih KOTA_BARU dari daftar.",
+    "Catatan lain": "Catatan lain yang perlu dibaca. Lihat kolom CATATAN PEMERIKSAAN.",
+    GRUP_OTO: "Kota di baris-baris ini sudah diganti otomatis dengan dua bukti yang saling menguatkan (mis. kecamatan di alamat dan data master). "
+              "Tidak perlu diperiksa; kolom PERUBAHAN OTOMATIS menjelaskan apa yang diubah. Bila ada yang keliru, ubah KOTA_BARU.",
+    GRUP_BERSIH: "Tidak ada catatan. Tidak perlu diperiksa.",
+}
+
+
+def grup_cleansing(catatan, oto):
+    """Nama kelompok sebuah baris Tahap 1: jenis masalah utamanya; bila tanpa catatan -> kota otomatis (info) atau bersih."""
+    if _t(catatan):
+        return kategori_masalah(catatan)[2]
+    return GRUP_OTO if _t(oto) else GRUP_BERSIH
+
+
+def ringkas_nama_kotor(nama_list):
+    """Ringkasan masalah nama yang masih kotor, mis. 'ada tanda - (2), belum ada , SEGMENT di akhir (1)'. Kosong bila bersih semua."""
+    from collections import Counter
+    hitung, n_baris = Counter(), 0
+    for n in nama_list:
+        m = cek_nama_kotor(n)
+        if m:
+            n_baris += 1
+            hitung.update(m)
+    return n_baris, ", ".join(f"{k} ({v})" for k, v in hitung.most_common(4))
 
 
 def tampil_cleansing(st):
@@ -2926,29 +3001,35 @@ def tampil_cleansing(st):
     if not pedoman:
         st.warning("Pedoman ID belum diunggah (buka Update Data Baru > Data pendukung > Pedoman penamaan ID). Kota dan segmen tidak dapat divalidasi.")
     t_full = tabel_cleansing(cl, kol, pedoman)
-    n_kt = sum(1 for n_ in cl["PNAMLANG_AKHIR"] if cek_nama_kotor(n_))
-    if n_kt:
-        st.warning(f"{n_kt} baris PNAMLANG_AKHIR masih kotor.")
+    grup_full = pd.Series([grup_cleansing(c, o) for c, o in zip(t_full["CATATAN_CEK"], t_full["PERUBAHAN_OTOMATIS"])],
+                          index=t_full.index, dtype=object)
     n_cek = int((t_full["CATATAN_CEK"] != "").sum())
-    st.write(f"Baris dengan catatan pemeriksaan: **{n_cek:,}** dari {len(t_full):,}")
-    hanya = st.checkbox("Tampilkan hanya data yang memerlukan pemeriksaan", value=False, key="hanya_cl")
-    urut = st.checkbox("Urutkan berdasarkan prioritas pemeriksaan (per level, lalu per jenis masalah)", value=True, key="urut_cl")
-    # Tabel dibekukan (snapshot) selama filter/urutan/file tidak berubah. Data yang diberikan ke editor tidak ikut berubah saat user
+    st.write(f"Baris yang perlu diperiksa: **{n_cek:,}** dari {len(t_full):,}")
+
+    # Ringkasan jumlah per kelompok + total nama yang masih kotor (rincian ada di tiap kelompok)
+    hit = grup_full.value_counts()
+    ring = pd.DataFrame([{"Kelompok": f"{ikon_grup(g)} {g}", "Jumlah baris": int(hit[g])}
+                         for g in GRUP_URUT if g in hit.index])
+    if len(ring):
+        st.dataframe(ring, hide_index=True, width="stretch")
+    n_kt, rinci_kt = ringkas_nama_kotor(cl["PNAMLANG_AKHIR"])
+    if n_kt:
+        st.warning(f"{n_kt} nama outlet masih kotor ({rinci_kt}). Peringatan dan rinciannya ada di kelompok masing-masing di bawah.")
+
+    hanya = st.checkbox("Sembunyikan kelompok yang tidak perlu diperiksa (kota diubah otomatis berbukti kuat dan data bersih)",
+                        value=False, key="hanya_cl")
+    # Tabel dibekukan (snapshot) selama filter/file tidak berubah. Data yang diberikan ke editor tidak ikut berubah saat user
     # mengedit, sehingga tabel tidak di-reset dan posisi scroll tetap. Hasil edit dihitung dari snapshot + perubahan user.
-    kunci_snap = (ss.get("cl_run", 0), bool(hanya), bool(urut))
+    kunci_snap = (ss.get("cl_run", 0), bool(hanya))
     if ss.get("cl_snap_key") != kunci_snap:
-        t0 = t_full[t_full["CATATAN_CEK"] != ""] if hanya else t_full
-        if urut and len(t0):
-            kk_ = t0["CATATAN_CEK"].map(kategori_masalah)
-            t0 = (t0.assign(_r=kk_.map(lambda x: x[0]), _g=kk_.map(lambda x: x[1]))
-                  .sort_values(["_r", "_g"], ascending=[False, True], kind="stable").drop(columns=["_r", "_g"]))
+        t0 = t_full[~grup_full.isin([GRUP_OTO, GRUP_BERSIH])] if hanya else t_full
         t0 = t0.copy()
         t0["KOTA_BARU"] = t0["KOTA_BARU"].map(lambda v: v if _t(v) else None).astype(object)
         t0["SEGMENT_BARU"] = t0["SEGMENT_BARU"].map(lambda v: v if _t(v) else None).astype(object)
         t0.insert(0, "NO.", [int(i_) + 1 for i_ in t0.index])
         t0.insert(1, "PRIORITAS", t0["CATATAN_CEK"].map(lambda c: LABEL_PRIORITAS[level_prioritas(c)]))
-        ss.update(cl_snap=t0, cl_snap_base=cl, cl_snap_key=kunci_snap)
-    t0, cl_base = ss["cl_snap"], ss["cl_snap_base"]
+        ss.update(cl_snap=t0, cl_grp=grup_full.loc[t0.index], cl_snap_base=cl, cl_snap_key=kunci_snap)
+    t0, cl_base, grup = ss["cl_snap"], ss["cl_snap_base"], ss["cl_grp"]
     if len(t0) == 0:
         st.info("Tidak ada baris untuk ditampilkan.")
     else:
@@ -2963,32 +3044,52 @@ def tampil_cleansing(st):
             "NO.": kolom_no(st),
             "PRIORITAS": st.column_config.TextColumn("PRIORITAS", help="Urutan yang perlu dibenarkan lebih dulu: Utama > Penting > Cek."),
             "CATATAN_CEK": st.column_config.TextColumn("CATATAN PEMERIKSAAN"),
+            "PERUBAHAN_OTOMATIS": st.column_config.TextColumn(
+                "PERUBAHAN OTOMATIS", help="Kota yang sudah diubah otomatis dengan bukti kuat. Informasi saja, tidak perlu diperiksa."),
             "PNAMLANG_AKHIR": st.column_config.TextColumn("PNAMLANG_AKHIR (edit)"),
             "KOTA_BARU": col_kota,
             "SEGMENT_BARU": col_segment(st, opsi_segment(t0["SEGMENT_BARU"].dropna())),
         }
         edit = ["KOTA_BARU", "PNAMLANG_AKHIR", "SEGMENT_BARU"]
-        st.caption("Warna baris: 🔴 Utama (kota diubah otomatis / salah ketik) · 🟠 Penting (alamat, CUST_ID, segmen tidak sesuai) · "
-                   "🟡 Cek (catatan lain) · tanpa warna = bersih. Warna tetap tampil walau pengurutan dimatikan.")
-        argumen = dict(key=f"cl_{kunci_snap}", hide_index=True, width="stretch",
-                       disabled=[c for c in t0.columns if c not in edit], column_config=cfg)
-        try:   # tabel berwarna (Streamlit baru); bila versi Streamlit belum mendukung, tampil tanpa warna (kolom PRIORITAS tetap ada)
-            ed = st.data_editor(t0.style.apply(warna_baris_prioritas, axis=1), **argumen)
-        except Exception:
-            ed = st.data_editor(t0, **argumen)
+        st.caption("Warna kelompok dan baris: 🔴 Utama · 🟠 Penting · 🟡 Cek · 🔵/🟢 tidak perlu diperiksa. "
+                   "Kelompok diurutkan dari yang paling perlu dibenarkan lebih dulu.")
+        eds, tampil = [], []
+        for n_g, label in enumerate(GRUP_URUT):
+            sub = t0[grup == label]
+            if sub.empty:
+                continue
+            level = LEVEL_GRUP.get(label, 1)
+            with st.expander(f"{ikon_grup(label)} {label} ({len(sub):,})", expanded=level >= 1):
+                st.caption(PETUNJUK_GRUP.get(label, ""))
+                # peringatan nama kotor khusus untuk kelompok ini (bukan satu peringatan global)
+                n_kg, rinci_g = ringkas_nama_kotor(sub["PNAMLANG_AKHIR"])
+                if n_kg and label != GRUP_BERSIH:
+                    st.warning(f"{n_kg} dari {len(sub)} baris di kelompok ini namanya masih kotor: {rinci_g}.")
+                if label == GRUP_BERSIH and not st.checkbox(f"Tampilkan {len(sub):,} baris bersih", key=f"tampil_bersih_{kunci_snap}"):
+                    continue
+                argumen = dict(key=f"cl_{kunci_snap}_{n_g}", hide_index=True, width="stretch",
+                               disabled=[c for c in sub.columns if c not in edit], column_config=cfg)
+                try:   # tabel berwarna (Streamlit baru); bila belum didukung, tampil tanpa warna (kolom PRIORITAS tetap ada)
+                    ed_g = st.data_editor(sub.style.apply(warna_baris_prioritas, axis=1), **argumen)
+                except Exception:
+                    ed_g = st.data_editor(sub, **argumen)
+                eds.append(ed_g)
+                tampil.append(sub)
         # edit user -> data aktif (tanpa memuat ulang tabel, agar posisi scroll tidak kembali ke atas)
-        ss["cl"] = terapkan_edit_cleansing(cl_base, ed) if not ed[edit].fillna("").astype(str).equals(
-            t0[edit].fillna("").astype(str)) else cl_base
-        cl = ss["cl"]
-        diubah = [i_ for i_ in t0.index
-                  if (_s(cl.at[i_, "KOTA_BARU"]), _s(cl.at[i_, "SEGMENT_BARU"]), _t(cl.at[i_, "PNAMLANG_AKHIR"]))
-                  != (_s(cl_base_val(cl_base, i_, "KOTA_BARU")), _s(cl_base_val(cl_base, i_, "SEGMENT_BARU")),
-                      _t(cl_base_val(cl_base, i_, "PNAMLANG_AKHIR")))]
-        if diubah:
-            with st.expander(f"Pratinjau {len(diubah)} baris yang Anda ubah (PNAMLANG_AKHIR mengikuti kota/segmen)"):
-                prev = tabel_cleansing(cl, kol, pedoman).loc[diubah, ["PNAMLANG_AKHIR", "KOTA_BARU", "SEGMENT_BARU", "CATATAN_CEK"]]
-                prev.insert(0, "NO.", [int(i_) + 1 for i_ in prev.index])
-                st.dataframe(prev, hide_index=True, width="stretch")
+        if eds:
+            ed, t_tampil = pd.concat(eds), pd.concat(tampil)
+            ss["cl"] = terapkan_edit_cleansing(cl_base, ed) if not ed[edit].fillna("").astype(str).equals(
+                t_tampil[edit].fillna("").astype(str)) else cl_base
+            cl = ss["cl"]
+            diubah = [i_ for i_ in t_tampil.index
+                      if (_s(cl.at[i_, "KOTA_BARU"]), _s(cl.at[i_, "SEGMENT_BARU"]), _t(cl.at[i_, "PNAMLANG_AKHIR"]))
+                      != (_s(cl_base_val(cl_base, i_, "KOTA_BARU")), _s(cl_base_val(cl_base, i_, "SEGMENT_BARU")),
+                          _t(cl_base_val(cl_base, i_, "PNAMLANG_AKHIR")))]
+            if diubah:
+                with st.expander(f"Pratinjau {len(diubah)} baris yang Anda ubah (PNAMLANG_AKHIR mengikuti kota/segmen)"):
+                    prev = tabel_cleansing(cl, kol, pedoman).loc[diubah, ["PNAMLANG_AKHIR", "KOTA_BARU", "SEGMENT_BARU", "CATATAN_CEK"]]
+                    prev.insert(0, "NO.", [int(i_) + 1 for i_ in prev.index])
+                    st.dataframe(prev, hide_index=True, width="stretch")
     st.divider()
     if st.button("Lanjut: Cocokkan dengan Master", type="primary", key="lanjut_master"):
         try:
