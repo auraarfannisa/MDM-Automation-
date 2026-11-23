@@ -151,6 +151,12 @@ _RX_APT_LOKASI = re.compile(r"^(.+?)\s+(?:APT|APOTEK|APOTIK)\.?\s*,.*$")
 _RX_PREFIX_FASILITAS = re.compile(
     r"^(?:UPTD|UPT|PUSKESMAS|PKM|RUMAH\s+SAKIT|RSUD|RSUP|RSIA|RSAD|RSAL|RSAU|RSPOL|RSU?|"
     r"APOTEK|APOTIK|APT|AP|KLINIK\s+(?:PRATAMA|UTAMA)|KLINIK)\b\.?\s*[,:\-]?\s*")
+# Awalan khusus rumah sakit: RSIA -> IBU DAN ANAK, RSI -> ISLAM, RUMKIT dibuang (sisa nama dipertahankan).
+_AWALAN_RS_KHUSUS = (
+    (re.compile(r"^RSIA\b\.?[\s,:\-]*"), "IBU DAN ANAK "),
+    (re.compile(r"^RSI\b\.?[\s,:\-]*"), "ISLAM "),
+    (re.compile(r"^RUMKIT\b\.?[\s,:\-]*"), ""),
+)
 _RX_DINKES = re.compile(r"^(?:DINAS\s+KESEHATAN|DINKES)\b\.?[\s,:\-]*")
 _RX_WILAYAH_AWAL = re.compile(r"^(?:KABUPATEN|KAB|KOTA|PROVINSI|PROV)\b\.?\s+")
 _RX_KURUNG_AKHIR = re.compile(r"\s*\(([^()]*)\)\s*$")
@@ -235,6 +241,14 @@ def clean_name_parts(raw_name, raw_segment):
         segment = "RS.UNIV"
         if suffix_khusus is None:
             suffix_khusus = "RS UNIV"
+
+    # RSIA / RSI / RUMKIT di depan nama diganti sebelum prefix generik dibuang.
+    for rx, ganti in _AWALAN_RS_KHUSUS:
+        if rx.match(name):
+            sisa = rx.sub("", name, count=1).strip()
+            if sisa:
+                name = (ganti + sisa).strip()
+            break
 
     # Prefix fasilitas generik. RSU. APBD -> nama tidak menyisakan APBD.
     for _ in range(3):   # bisa berlapis, mis. 'UPT PUSKESMAS RANTANG'
@@ -398,13 +412,11 @@ def cari_kota_dari_kecamatan(alamat, kota, kec_idx, pedoman=None):
                     if base in kunci_wilayah(kab)[1]:
                         hasil.add(kab)
         if len(hasil) == 1 and ganda and not mk:
-            return None, (f"Kota '{kota}' bisa KAB. atau KOTA; kecamatan di alamat mengarah ke {next(iter(hasil))} "
-                          "tetapi tanpa penanda KEC.; pilih KOTA_BARU secara manual")
+            return None, f"pilih KAB. atau KOTA (kecamatan di alamat mengarah ke {next(iter(hasil))})"
         if len(hasil) == 1:
             return next(iter(hasil)), ""
         if len(hasil) > 1:
-            return None, ("Kecamatan di alamat cocok dengan beberapa kota (" + ", ".join(sorted(hasil))
-                          + "); pilih KOTA_BARU secara manual")
+            return None, "kecamatan di alamat cocok dengan beberapa kota (" + ", ".join(sorted(hasil)) + ")"
     return None, ""
 
 
@@ -447,7 +459,7 @@ KOREKSI_OTOMATIS_KOTA = True
 
 # Tingkat keyakinan perubahan kota otomatis. Perubahan yang buktinya KUAT diberi awalan TAG_OTO. Catatannya TIDAK
 # ditampilkan sebagai peringatan di kolom CATATAN PEMERIKSAAN (supaya pengguna tidak memeriksa yang sudah hampir pasti),
-# tetapi dicatat di kolom terpisah PERUBAHAN_OTOMATIS agar tetap bisa ditelusuri.
+# tetapi dicatat di kolom terpisah CATATAN_PERUBAHAN agar tetap bisa ditelusuri.
 # Keyakinan TINGGI (disembunyikan dari peringatan): dua bukti yang saling menguatkan, yaitu
 #   (a) kecamatan/kelurahan di alamat ada di kota X DAN master mencatat kota X untuk CUST_ID yang sama;
 #   (b) penanda 'KEC. X' di alamat tidak ada di kota tertulis, hanya ada di satu kab/kota, dan provinsinya sama / kelurahan cocok;
@@ -517,19 +529,19 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None, bukti_mast
             sama = {c for c in narrowed if prov.get(c, set()) & prov_k}
             if sama:
                 narrowed = sama
-        dasar = f"Alamat dan kota tidak sesuai: KEC. {kec_txt} tidak ada di {kota}"
+        dasar = f"kecamatan {kec_txt} tidak ada di {kota}"
         bm = _norm_kab(bukti_master) if bukti_master else ""
         if bm and bm in narrowed and KOREKSI_OTOMATIS_KOTA:      # alamat + master menunjuk kota yang sama
             kanon = kanonik_kota(bm, pedoman)
-            return kanon, TAG_OTO + f"{dasar}; kota diubah otomatis ({kota} -> {kanon})"
+            return kanon, TAG_OTO + f"kecamatan {kec_txt} ada di {kanon}"
         if len(narrowed) == 1:
             kab = next(iter(narrowed))
             kuat = via_kel or bool(prov.get(kab, set()) & prov_k)
             kanon = kanonik_kota(kab, pedoman)
             if kuat and KOREKSI_OTOMATIS_KOTA:
-                return kanon, TAG_OTO + f"{dasar}; kota diubah otomatis ({kota} -> {kanon})"
-            return None, f"{dasar}; kota yang disarankan: {kanon}. Pilih KOTA_BARU yang benar"
-        return None, f"{dasar}; ada di: {daftar(narrowed)}. Pilih KOTA_BARU secara manual"
+                return kanon, TAG_OTO + f"kecamatan {kec_txt} ada di {kanon}"
+            return None, f"{dasar} (ada di {kanon})"
+        return None, f"{dasar} (ada di {daftar(narrowed)})"
     mk = _RX_KEL.search(a)
     if mk:                                         # tanpa 'KEC.' tetapi ada 'KEL./DESA X'
         kel_txt = mk.group(1).strip(" .")
@@ -542,18 +554,18 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None, bukti_mast
             for kab_, pv in prov.items():
                 if di_kota(kab_):
                     prov_k |= pv
-            dasar = f"Alamat dan kota tidak sesuai: KEL./DESA {kel_txt} tidak ada di {kota}"
+            dasar = f"kelurahan {kel_txt} tidak ada di {kota}"
             bm = _norm_kab(bukti_master) if bukti_master else ""
             if bm and bm in kab_set and KOREKSI_OTOMATIS_KOTA:
                 kanon = kanonik_kota(bm, pedoman)
-                return kanon, TAG_OTO + f"{dasar}; kota diubah otomatis ({kota} -> {kanon})"
+                return kanon, TAG_OTO + f"kelurahan {kel_txt} ada di {kanon}"
             if len(kab_set) == 1:
                 kab = next(iter(kab_set))
                 kanon = kanonik_kota(kab, pedoman)
                 if KOREKSI_OTOMATIS_KOTA and (prov.get(kab, set()) & prov_k):
-                    return kanon, f"{dasar}; kota diubah otomatis ({kota} -> {kanon}), periksa kembali"
-                return None, f"{dasar}; kota yang disarankan: {kanon}. Pilih KOTA_BARU yang benar"
-            return None, f"{dasar}; ada di: {daftar(kab_set)}. Pilih KOTA_BARU secara manual"
+                    return kanon, f"kota diubah dari {kota} ke {kanon}"
+                return None, f"{dasar} (ada di {kanon})"
+            return None, f"{dasar} (ada di {daftar(kab_set)})"
     # tanpa penanda KEC.: segmen terakhir alamat (hanya catatan)
     segs = [x.strip() for x in re.split(r"\s*[-,;/()]\s*", a) if x.strip()]
     if not segs:
@@ -576,10 +588,9 @@ def periksa_kecamatan_kota_pusat(alamat, kota, kec_idx, pedoman=None, bukti_mast
         for teks_, cands_ in ditemukan.items():
             if bm in cands_:
                 kanon = kanonik_kota(bm, pedoman)
-                return kanon, (TAG_OTO + f"Alamat dan kota tidak sesuai (diduga): kecamatan {teks_} ada di {kanon}, sesuai master untuk "
-                               f"CUST_ID yang sama; kota diubah otomatis ({kota} -> {kanon})")
+                return kanon, TAG_OTO + f"kecamatan {teks_} ada di {kanon}"
     teks, cands = max(ditemukan.items(), key=lambda kv: len(kv[0]))
-    return None, f"Alamat dan kota tidak sesuai (diduga): kecamatan {teks} tidak ada di {kota} (ada di {daftar(cands)})"
+    return None, f"kecamatan {teks} tidak ada di {kota} (ada di {daftar(cands)})"
 
 
 # ---- Lapis 1: salah ketik nama kota (dibandingkan dengan nama resmi pedoman) ----
@@ -693,22 +704,26 @@ def bangun_cust_kota(master):
 def catatan_riwayat_kota(kota_asal, kota_kini, riwayat):
     """Catatan untuk kota pusat distributor tanpa bukti alamat: ke mana kota asal ini biasa dikoreksi sebelumnya."""
     tujuan = (riwayat or {}).get(_kunci_teks(kota_asal))
-    if not tujuan or set(tujuan) <= {_norm_kab(kota_kini)}:
+    if not tujuan:
+        return ""
+    kini = _norm_kab(kota_kini)
+    lain = sum(n for k, n in tujuan.items() if k != kini)
+    if lain < 2:   # koreksi ke kota lain baru 0-1 kali: belum cukup jadi petunjuk, dianggap bersih
         return ""
     top = sorted(tujuan.items(), key=lambda kv: -kv[1])[:3]
-    return ("Kota pusat distributor tanpa bukti di alamat; riwayat koreksi '" + _norm_kab(kota_asal) + "': "
-            + ", ".join(f"{k} ({n}x)" for k, n in top) + ". Periksa")
+    return f"riwayat koreksi {_norm_kab(kota_asal)}: " + ", ".join(f"{k} ({n}x)" for k, n in top)
 
 
 # Kategori catatan pemeriksaan tahap 1: (skor, label, potongan teks pemicu). Dicocokkan dari atas; yang pertama cocok menentukan
 # kategori baris. Urutan tampilan: skor tertinggi dulu, di dalamnya per kategori (sesuai urutan daftar ini), lalu urutan file.
 KATEGORI_MASALAH = [
-    (3, "Kota diubah otomatis", ("diubah otomatis",)),
+    (3, "Kota diubah otomatis", ("kota diubah dari",)),
     (3, "Kota diduga salah ketik", ("salah ketik",)),
-    (2, "Alamat tidak sesuai kota", ("Alamat dan kota tidak sesuai", "Alamat menyebut", "Kecamatan di alamat cocok")),
+    (2, "Alamat tidak sesuai kota", ("(ada di ", "kecamatan di alamat")),
+    (2, "CUST_ID kembar di file (isi berbeda)", ("CUST_ID kembar",)),
     (2, "CUST_ID sudah ada di master dengan kota lain", ("sudah ada di master",)),
-    (2, "Kota harus dipilih manual", ("Pilih KOTA_BARU", "pilih KOTA_BARU")),
-    (2, "Riwayat koreksi kota", ("riwayat",)),
+    (2, "Kota harus dipilih manual", ("pilih salah satu antara", "pilih KAB. atau KOTA")),
+    (2, "Riwayat koreksi kota", ("riwayat koreksi",)),
     (2, "Segmen tidak sesuai CHANNEL OUTLET", ("tidak sesuai CHANNEL",)),
     (1, "Nama kosong", ("Nama kosong",)),
     (1, "Nama masih kotor", ("Nama masih kotor",)),
@@ -792,9 +807,9 @@ def segmen_dari_channel_df(seg, channel):
             if not s_:
                 s0, cat = sk, f"Segmen kosong, diisi dari CHANNEL OUTLET ({ch_t} -> {sk})"
             elif SEGMENT_SETARA.get(s_, s_) != SEGMENT_SETARA.get(sk, sk):
-                cat = f"Segmen {s_} tidak sesuai CHANNEL OUTLET ({ch_t} -> {sk}); periksa"
+                cat = f"Segmen {s_} tidak sesuai CHANNEL OUTLET ({ch_t} -> {sk})"
         elif not s_ and ch_t:
-            cat = f"Segmen kosong dan CHANNEL OUTLET '{ch_t}' tidak bisa dikonversi otomatis; isi manual"
+            cat = f"Segmen kosong, CHANNEL OUTLET '{ch_t}' tidak bisa dikonversi"
         seg_out.append(s0)
         cat_out.append(cat)
     return seg_out, cat_out
@@ -844,12 +859,12 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
                     if k not in memo_typo:
                         memo_typo[k] = perbaiki_typo_kota(k, pedoman)
                     if memo_typo[k]:
-                        cat.append(f"Kota diduga salah ketik ({k} -> {memo_typo[k]}), periksa kembali")
+                        cat.append(f"diduga salah ketik: {k} -> {memo_typo[k]}")
                         k, diubah = memo_typo[k], True
                 # Aturan khusus: alamat memuat KUTA tetapi kota tertulis DENPASAR -> yang benar KAB. BADUNG
                 if (not pd.isna(a) and not kamus and kunci_wilayah(k)[1] == "DENPASAR"
                         and re.search(r"\bKUTA\b", str(a).upper())):
-                    cat.append(TAG_OTO + f"Alamat memuat KUTA, kota {k} diubah otomatis ke KAB. BADUNG")
+                    cat.append(TAG_OTO + "alamat memuat KUTA, ada di KAB. BADUNG")
                     k, diubah = kanonik_kota("KAB. BADUNG", pedoman), True
                 if not pd.isna(a) and not kamus:
                     # Lapis 2a: kab/kota tertulis eksplisit di alamat (KAB. X / KOTA X)
@@ -860,7 +875,7 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
                             k, diubah = eks, True
                         eks_cocok = True
                     elif eks:
-                        cat.append(f"Alamat menyebut {eks}, berbeda dengan kota {k}; kota diubah otomatis ({k} -> {eks}), periksa kembali")
+                        cat.append(f"kota diubah dari {k} ke {eks}")
                         k, diubah, eks_cocok = eks, True, True
                     else:
                         eks_cocok = False
@@ -886,20 +901,20 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
                         seg_kota = None if (a is None or pd.isna(a) or kamus) else kota_dari_segmen_alamat(a, pedoman)
                         if seg_kota and _norm_kab(seg_kota) == _norm_kab(km):
                             # dua bukti sejalan (alamat + master untuk cust_id yang sama): koreksi otomatis
-                            cat.append(TAG_OTO + f"Alamat dan master sama-sama menunjuk {_norm_kab(km)}; kota diubah otomatis ({k} -> {_norm_kab(km)})")
+                            cat.append(TAG_OTO + f"alamat dan master menunjuk {_norm_kab(km)}")
                             k, diubah = _norm_kab(km), True
                         else:
-                            cat.append(f"CUST_ID ini sudah ada di master dengan kota {_norm_kab(km)}; periksa")
+                            cat.append(f"CUST_ID ini sudah ada di master dengan kota {_norm_kab(km)}")
                 # Lapis 3: kota pusat distributor tanpa bukti alamat -> tampilkan riwayat koreksi
                 if not kamus and not diubah and not cat and riwayat and kota_pusat_distributor(k):
                     c3 = catatan_riwayat_kota(k0, k, riwayat)
                     if c3:
                         cat.append(c3)
-            # pisahkan: keyakinan tinggi -> kolom PERUBAHAN_OTOMATIS; sisanya -> CATATAN PEMERIKSAAN
-            oto_n.append("; ".join(x[len(TAG_OTO):] for x in cat if x.startswith(TAG_OTO)))
+            # pisahkan: keyakinan tinggi -> kolom CATATAN_PERUBAHAN; sisanya -> CATATAN PEMERIKSAAN
+            oto_n.append(" | ".join(x[len(TAG_OTO):] for x in cat if x.startswith(TAG_OTO)))
             cat = [x for x in cat if not x.startswith(TAG_OTO)]
             kota_n.append(k)
-            cat_n.append("; ".join(cat))
+            cat_n.append(" | ".join(cat))
         df["KOTA_BARU"] = pd.Series(kota_n, index=df.index, dtype=object)
         df["_CAT_KEC"] = pd.Series(cat_n, index=df.index, dtype=object)
         df["_CAT_OTO"] = pd.Series(oto_n, index=df.index, dtype=object)
@@ -912,7 +927,7 @@ def clean_dataframe_baru(df, pedoman=None, kec_idx=None, kol_alamat=None, riwaya
     for k_, (s0, n0) in enumerate(zip(seg_l, nama)):
         if _s(s0) == "" and not pd.isna(n0) and re.search(r"\b(?:RSUD|RSUP)\b", str(n0).upper()):
             seg_l[k_] = "RS.PEM"
-            cat_seg[k_] = "Segmen kosong, diisi RS.PEM dari nama (RSUD/RSUP); periksa"
+            cat_seg[k_] = "Segmen kosong, diisi RS.PEM dari nama RSUD/RSUP"
     df["_CAT_SEG"] = pd.Series(cat_seg, index=df.index, dtype=object)
     seg = pd.Series(seg_l, index=df.index, dtype=object)
     parts = []
@@ -2123,6 +2138,9 @@ def terapkan_selisih_overrides(selisih, keputusan, ko, no, pm, label_ke_aksi=Non
 # ==============================================================================
 import hashlib
 import os
+import pickle
+import uuid
+import zlib
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -2177,6 +2195,9 @@ def ensure_meta_tables():
         c.execute(text(
             "CREATE TABLE IF NOT EXISTS koreksi_kota (id SERIAL PRIMARY KEY, waktu TIMESTAMPTZ DEFAULT now(), "
             "kota_asal TEXT, kota_oto TEXT, kota_baru TEXT, distributor TEXT, nama_file TEXT)"))
+        c.execute(text(
+            "CREATE TABLE IF NOT EXISTS draft_kerja (token TEXT PRIMARY KEY, waktu TIMESTAMPTZ DEFAULT now(), "
+            "nama_file TEXT, tahap INTEGER, payload BYTEA)"))
         c.execute(text(
             "CREATE TABLE IF NOT EXISTS riwayat_id (id SERIAL PRIMARY KEY, waktu TIMESTAMPTZ DEFAULT now(), batch_id INTEGER, "
             "id_lama TEXT, id_baru TEXT, pnamlang_lama TEXT, pnamlang_baru TEXT, kota_lama TEXT, kota_baru TEXT, "
@@ -2410,6 +2431,171 @@ def simpan_update(df_final, df_asli, df_log, nama_file, hash_file, ringkasan, ba
 # EXCEL
 # Pembuat file Excel unduhan. xlsxwriter dipakai bila terpasang (lebih cepat untuk puluhan ribu baris).
 # ==============================================================================
+# ------------------------------------------------------------------------------
+# DRAFT PEKERJAAN (tahan refresh / tombol Kembali browser)
+# Session Streamlit hilang bila halaman dimuat ulang (mis. swipe/Back di Chrome). Agar pekerjaan yang belum disimpan ke master
+# tidak hilang, keadaan kerja disimpan ke tabel draft_kerja di Neon dengan token di URL (?s=...). Saat halaman dibuka lagi
+# dengan token yang sama (atau lewat tombol 'Pulihkan' di sidebar), pekerjaan dipulihkan. Draft dihapus setelah disimpan ke master
+# atau setelah 14 hari.
+# ------------------------------------------------------------------------------
+KUNCI_DRAFT = ["nama_file", "hash", "batch_week", "base_ver", "tahap", "cl", "cl_run", "kol_cl", "info_bersih", "n_cust_cocok",
+               "kec_ada", "run_args", "ganti_id_aktif", "ganti_id", "keputusan", "kota_override", "nama_override",
+               "segmen_override", "master_nama_override", "rv", "rv_ver", "tab_aktif", "sama_pilih", "cust_pilih", "saved", "fname"]
+KUNCI_KERJA_LAIN = ["res", "cl_snap", "cl_snap_key", "cl_grp", "cl_snap_base", "draft_sig", "draft_info", "xlsx", "draft_dihapus"]
+DRAFT_HARI = 14
+
+
+def _sig_draft(ss):
+    """Sidik jari ringan keadaan kerja; draft hanya ditulis ulang bila berubah."""
+    h = hashlib.md5()
+    for k in ("tahap", "saved", "tab_aktif", "ganti_id_aktif", "cl_run", "hash", "sama_pilih", "cust_pilih"):
+        h.update(repr(ss.get(k)).encode())
+    for k in ("keputusan", "kota_override", "nama_override", "segmen_override", "master_nama_override"):
+        h.update(repr(sorted((ss.get(k) or {}).items(), key=lambda kv: str(kv[0]))).encode())
+    for k, kols in (("cl", ("KOTA_BARU", "SEGMENT_BARU", "PNAMLANG_AKHIR")),
+                    ("rv", ("KOTA_BARU", "SEGMENT_BARU", "PNAMLANG_AKHIR", "SETUJU", "BUANG", "GABUNG"))):
+        d = ss.get(k)
+        if d is not None and len(d):
+            h.update(str(len(d)).encode())
+            h.update(str(int(pd.util.hash_pandas_object(d[[c for c in kols if c in d.columns]].astype(str), index=False).sum())).encode())
+    return h.hexdigest()
+
+
+def draft_simpan(st):
+    """Simpan keadaan kerja ke Neon bila berubah sejak penyimpanan terakhir. Tidak pernah mengganggu aplikasi bila gagal."""
+    ss = st.session_state
+    tok = ss.get("sesi_token")
+    if not tok or ss.get("cl") is None:
+        return
+    try:
+        sig = _sig_draft(ss)
+        if ss.get("draft_sig") == sig:
+            return
+        data = {k: ss.get(k) for k in KUNCI_DRAFT if k in ss}
+        ra = dict(data.get("run_args") or {})
+        ra.pop("df_bersih", None)   # sama dengan cl; dibuat ulang saat pemulihan
+        data["run_args"] = ra
+        blob = zlib.compress(pickle.dumps(data, protocol=4), 3)
+        with engine().begin() as c:
+            c.execute(text(
+                "INSERT INTO draft_kerja (token, waktu, nama_file, tahap, payload) VALUES (:t, now(), :n, :s, :p) "
+                "ON CONFLICT (token) DO UPDATE SET waktu = now(), nama_file = :n, tahap = :s, payload = :p"),
+                {"t": tok, "n": _t(ss.get("nama_file")), "s": int(ss.get("tahap") or 0), "p": blob})
+        ss["draft_sig"] = sig
+        ss.pop("draft_dihapus", None)
+    except Exception:
+        pass
+
+
+def draft_hapus(st):
+    ss = st.session_state
+    tok = ss.get("sesi_token")
+    if not tok or ss.get("draft_dihapus"):
+        return
+    try:
+        with engine().begin() as c:
+            c.execute(text("DELETE FROM draft_kerja WHERE token = :t"), {"t": tok})
+        ss["draft_dihapus"] = True
+    except Exception:
+        pass
+
+
+def draft_catat(st):
+    """Dipanggil di akhir halaman Update: simpan draft, atau hapus bila hasil sudah tersimpan ke master."""
+    if st.session_state.get("saved"):
+        draft_hapus(st)
+    else:
+        draft_simpan(st)
+
+
+def draft_pulihkan(st, tok):
+    """Pulihkan keadaan kerja dari draft bertoken `tok`. True bila berhasil."""
+    ss = st.session_state
+    try:
+        with engine().connect() as c:
+            r = c.execute(text("SELECT payload, waktu FROM draft_kerja WHERE token = :t"), {"t": tok}).first()
+        if r is None:
+            return False
+        data = pickle.loads(zlib.decompress(bytes(r[0])))
+        if data.get("cl") is None or data.get("saved"):
+            return False
+        ss.update(data)
+        ss["sesi_token"] = tok
+        cl = ss["cl"]
+        ra = dict(ss.get("run_args") or {})
+        ra["df_bersih"] = cl
+        ss["run_args"] = ra
+        ss["sh_baru"] = {ra["sheet_baru"]: cl.head(1)}   # run_mdm hanya memeriksa keberadaan sheet & kolom; isi diambil dari df_bersih
+        c_ = cache_db(st)
+        ss["pedoman"], ss["known"] = c_["pedoman"], c_["known"]
+        ss["cl_run"] = ss.get("cl_run", 0) + 1
+        for k in KUNCI_KERJA_LAIN:
+            ss.pop(k, None)
+        if data.get("tahap") == 2 and data.get("rv") is not None:
+            _jalankan(st, ss.get("keputusan", {}), pertahankan=True)   # hitung ulang pencocokan; edit & centang dari draft dipertahankan
+        _, last = master_info()
+        basi = (last[0] if last else 0) != data.get("base_ver")
+        ss["draft_info"] = (f"Pekerjaan yang belum disimpan dipulihkan dari draft ({_wib_str(r[1])[:16]} WIB, file {_t(data.get('nama_file'))})."
+                            + (" Master berubah sejak draft dibuat; jalankan ulang cleansing sebelum menyimpan." if basi else ""))
+        return True
+    except Exception as e:
+        ss["draft_info"] = f"Draft tidak bisa dipulihkan ({e}). Mulai dari awal."
+        return False
+
+
+def sesi_awal(st):
+    """Beri token sesi (di URL ?s=...) dan pulihkan draft bila halaman dimuat ulang dengan token yang sama."""
+    ss = st.session_state
+    if "sesi_token" in ss:
+        return
+    tok = None
+    try:
+        tok = st.query_params.get("s")
+    except Exception:
+        pass
+    ss["sesi_token"] = tok or uuid.uuid4().hex[:12]
+    if not tok:
+        try:
+            st.query_params["s"] = ss["sesi_token"]
+        except Exception:
+            pass
+    elif ss.get("cl") is None:
+        draft_pulihkan(st, tok)
+
+
+def sidebar_draft(st):
+    """Sidebar: tombol pulihkan draft terakhir (bila halaman dibuka tanpa token) dan tombol mulai dari awal."""
+    ss = st.session_state
+    try:
+        if ss.get("cl") is None:
+            with engine().begin() as c:
+                c.execute(text("DELETE FROM draft_kerja WHERE waktu < now() - make_interval(days => :d)"), {"d": DRAFT_HARI})
+                r = c.execute(text("SELECT token, nama_file, waktu, tahap FROM draft_kerja ORDER BY waktu DESC LIMIT 1")).first()
+            if r:
+                st.sidebar.info(f"Ada pekerjaan yang belum disimpan: {_t(r[1])} (tahap {r[3]}, {_wib_str(r[2])[:16]} WIB).")
+                if st.sidebar.button("Pulihkan pekerjaan terakhir", key="pulihkan_draft"):
+                    ok = draft_pulihkan(st, r[0])
+                    if ok:
+                        try:
+                            st.query_params["s"] = r[0]
+                        except Exception:
+                            pass
+                    st.rerun()
+        elif not ss.get("saved"):
+            if st.sidebar.button("Mulai dari awal (buang draft)", key="reset_draft"):
+                draft_hapus(st)
+                for k in KUNCI_DRAFT + KUNCI_KERJA_LAIN + ["sh_baru", "sh_hash", "tab_widget", "res"]:
+                    ss.pop(k, None)
+                ss["sesi_token"] = uuid.uuid4().hex[:12]
+                try:
+                    st.query_params["s"] = ss["sesi_token"]
+                except Exception:
+                    pass
+                st.rerun()
+    except Exception:
+        pass
+
+
 def _engine():
     try:
         import xlsxwriter  # noqa: F401
@@ -2781,6 +2967,38 @@ def buang_header_ganda_dan_kosong(d):
     return bersih, int(kosong.sum()), int(header.sum())
 
 
+def gabung_duplikat_persis(d):
+    """Baris yang SELURUH isinya sama persis (termasuk CUST_ID) digabung jadi satu (baris pertama dipertahankan).
+    Baris dengan CUST_ID + distributor sama tetapi isi kolom lain berbeda TIDAK digabung otomatis; ditandai di kolom _CAT_DUP
+    (baris dan kolom yang berbeda) supaya diputuskan manual. Kembalikan (df, jumlah baris digabung)."""
+    kc, kd = deteksi_kolom(d, "cust_id"), deteksi_kolom(d, "distributor")
+    d = d.copy()
+    d["_CAT_DUP"] = ""
+    if not kc or not len(d):
+        return d, 0
+    kolom_cmp = [c for c in d.columns if c not in ("BARIS_EXCEL", "_CAT_DUP")]
+    teks = d[kolom_cmp].fillna("").astype(str).apply(lambda s: s.str.strip())
+    ada_id = d[kc].map(lambda v: _norm_id(v) is not None)
+    dup = teks.duplicated(keep="first") & ada_id
+    n_dup = int(dup.sum())
+    if n_dup:
+        d, teks, ada_id = d[~dup], teks[~dup], ada_id[~dup]
+    kunci = pd.Series([f"{_norm_dist(x) if kd else ''}|{_norm_id(c) or ''}" for x, c in
+                       zip(d[kd] if kd else [""] * len(d), d[kc])], index=d.index)
+    kunci = kunci[ada_id]
+    for _, idxs in kunci.groupby(kunci).groups.items():
+        idxs = list(idxs)
+        if len(idxs) < 2:
+            continue
+        sub = teks.loc[idxs]
+        beda = [c for c in kolom_cmp if sub[c].nunique() > 1]
+        for ix in idxs:
+            lain = [str(d.at[j, "BARIS_EXCEL"]) for j in idxs if j != ix]
+            d.at[ix, "_CAT_DUP"] = (f"CUST_ID kembar dengan baris {', '.join(lain[:4])}" + (" ..." if len(lain) > 4 else "")
+                                    + (f"; beda di: {', '.join(map(str, beda[:4]))}" + (" ..." if len(beda) > 4 else "")))
+    return d, n_dup
+
+
 def siapkan_murni(sheets_baru, sheet_baru):
     """Sheet data baru + nomor baris Excel; validasi kolom nama & kota."""
     if sheet_baru not in sheets_baru:
@@ -2788,7 +3006,8 @@ def siapkan_murni(sheets_baru, sheet_baru):
     d = samakan_nama_kolom(sheets_baru[sheet_baru].copy())   # 'NAMA GROUP CHAIN' -> NAMA_GROUP_CHAIN, dst.
     d["BARIS_EXCEL"] = d.index + 2  # nomor baris Excel ASLI (baris 1 = header); dihitung SEBELUM baris dibuang
     d, n_kosong, n_header = buang_header_ganda_dan_kosong(d)
-    d.attrs["info_bersih"] = (n_kosong, n_header)
+    d, n_dup = gabung_duplikat_persis(d)
+    d.attrs["info_bersih"] = (n_kosong, n_header, n_dup)
     for kolom, kandidat in (("nama", ("PNAMLANG_CLEAN", "PNAMLANG")), ("kota", ("KOTA_CLEAN", "KOTA"))):
         if not any(c in d.columns for c in kandidat):
             raise ValueError(f"Sheet '{sheet_baru}' tidak memiliki kolom {kolom} ({' / '.join(kandidat)}). "
@@ -2834,7 +3053,7 @@ def hanya_anomali(catatan):
     """Buang bagian catatan yang hanya informasi (lihat CATATAN_INFO_SAJA); sisakan yang perlu dicek."""
     if catatan is None or pd.isna(catatan) or not str(catatan):
         return ""
-    return "; ".join(x for x in str(catatan).split("; ") if x and not x.startswith(CATATAN_INFO_SAJA))
+    return " | ".join(x for x in str(catatan).split(" | ") if x and not x.startswith(CATATAN_INFO_SAJA))
 
 
 def catatan_cleansing(cl, pedoman):
@@ -2843,7 +3062,8 @@ def catatan_cleansing(cl, pedoman):
     wil_map = pedoman["wil"] if pedoman else {}
     out = []
     cat_seg = cl["_CAT_SEG"] if "_CAT_SEG" in cl.columns else [""] * len(cl)
-    for k, sg, n, ck, cs in zip(cl["KOTA_BARU"], cl["SEGMENT_BARU"], cl["PNAMLANG_AKHIR"], cl["_CAT_KEC"], cat_seg):
+    cat_dup = cl["_CAT_DUP"] if "_CAT_DUP" in cl.columns else [""] * len(cl)
+    for k, sg, n, ck, cs, cd in zip(cl["KOTA_BARU"], cl["SEGMENT_BARU"], cl["PNAMLANG_AKHIR"], cl["_CAT_KEC"], cat_seg, cat_dup):
         notes, kk, ss_ = [], _norm_kab(k), _s(sg)
         if pedoman:
             if not ss_:
@@ -2855,20 +3075,20 @@ def catatan_cleansing(cl, pedoman):
             elif kk not in wil_map:
                 kand = pedoman.get("by_base", {}).get(kunci_wilayah(kk)[1], [])
                 if len(kand) > 1:
-                    notes.append(f"Kota '{kk}' ada sebagai {' dan '.join(kand)} di pedoman; pilih salah satu di KOTA_BARU")
+                    notes.append(f"pilih salah satu antara {' dan '.join(kand)}")
                 else:
-                    notes.append(f"Kota '{kk}' belum berupa nama resmi di pedoman; pilih di KOTA_BARU")
+                    notes.append(f"Kota '{kk}' belum berupa nama resmi")
         if not _s(n):
             notes.append("Nama kosong")
         if ss_ == "RS.TNI-POL" and not re.search(r",\s*(RSAD|RSAL|RSAU|RSPOL)\s*$", _s(n)):
-            notes.append("Segmen RS.TNI-POL: suffix (RSAD/RSAL/RSAU/RSPOL) tidak bisa dipastikan; isi manual di PNAMLANG_AKHIR")
+            notes.append("Segmen RS.TNI-POL: isi suffix RSAD/RSAL/RSAU/RSPOL manual")
         kotor = cek_nama_kotor(n)
         if kotor:
             notes.append("Nama masih kotor: " + "; ".join(kotor))
-        for c_ in (hanya_anomali(ck), hanya_anomali(cs)):   # hanya anomali yang ditampilkan
+        for c_ in (hanya_anomali(ck), hanya_anomali(cs), _t(cd)):   # hanya anomali yang ditampilkan
             if c_:
                 notes.append(c_)
-        out.append("; ".join(notes))
+        out.append(" | ".join(notes))
     return pd.Series(out, index=cl.index, dtype=object)
 
 
@@ -2880,8 +3100,7 @@ def tabel_cleansing(cl, kol, pedoman):
     cat_ = catatan_cleansing(cl, pedoman)
     t = pd.DataFrame({
         "CATATAN_CEK": cat_,
-        "JENIS_MASALAH": cat_.map(lambda c: kategori_masalah(c)[2]),
-        "PERUBAHAN_OTOMATIS": cl["_CAT_OTO"] if "_CAT_OTO" in cl.columns else "",   # keyakinan tinggi: info saja, bukan peringatan
+        "CATATAN_PERUBAHAN": cl["_CAT_OTO"] if "_CAT_OTO" in cl.columns else "",   # keyakinan tinggi: info saja, bukan peringatan
         "PNAMLANG_ASAL": cl["PNAMLANG_ASAL"],
         "PNAMLANG_AKHIR": cl["PNAMLANG_AKHIR"],
         "ALAMAT": kolom("alamat"),
@@ -2945,14 +3164,15 @@ def ikon_grup(label):
     """Ikon kelompok: merah/oranye/kuning menurut level; biru = kota diubah otomatis (info); hijau = bersih."""
     return "🔵" if label == GRUP_OTO else IKON_LEVEL[LEVEL_GRUP.get(label, 1)]
 PETUNJUK_GRUP = {
-    "Kota diubah otomatis": "Sistem mengganti kota dengan satu bukti (mis. alamat menyebut kota lain). Pastikan kota barunya benar; "
-                            "bila salah, pilih kota yang benar di kolom KOTA_BARU.",
+    "Kota diubah otomatis": "Sistem mengganti kota dengan satu bukti (mis. alamat menyebut kota lain); catatan menunjukkan kota asal dan kota baru. "
+                            "Pastikan kota barunya benar; bila salah, pilih kota yang benar di kolom KOTA_BARU.",
+    "Riwayat koreksi kota": "Kota asal ini sudah beberapa kali Anda koreksi ke kota lain pada batch sebelumnya (catatan menunjukkan tujuannya). "
+                            "Cek apakah koreksi yang sama berlaku. Koreksi yang baru 1x tidak ditandai.",
     "Kota diduga salah ketik": "Nama kota mirip dengan satu kota resmi, sehingga diperbaiki otomatis. Cek bahwa perbaikannya tepat.",
     "Alamat tidak sesuai kota": "Kecamatan atau kota di alamat tidak cocok dengan kota yang tertulis, tetapi sistem belum cukup yakin untuk mengubahnya. "
                                 "Periksa alamat lalu pilih KOTA_BARU yang benar.",
     "CUST_ID sudah ada di master dengan kota lain": "CUST_ID ini sudah tercatat di master dengan kota berbeda. Pastikan outlet yang sama atau perbaiki kotanya.",
     "Kota harus dipilih manual": "Sistem tidak bisa menentukan kota (ada beberapa kemungkinan). Pilih KOTA_BARU dari daftar.",
-    "Riwayat koreksi kota": "Kota asal ini pernah Anda koreksi sebelumnya ke kota lain (lihat catatan). Cek apakah koreksi yang sama berlaku.",
     "Segmen tidak sesuai CHANNEL OUTLET": "Segmen di data berbeda dengan hasil konversi CHANNEL OUTLET (lihat kolom CHANNEL_OUTLET). Pilih SEGMENT_BARU yang benar.",
     "Nama kosong": "Nama outlet kosong. Isi PNAMLANG_AKHIR secara manual.",
     "Nama masih kotor": "Nama masih memuat tanda atau kata yang tidak lazim. Rapikan PNAMLANG_AKHIR (pola: NAMA (KOTA), SEGMEN).",
@@ -2961,7 +3181,10 @@ PETUNJUK_GRUP = {
     "Kota kosong / bukan nama resmi pedoman": "Kota kosong atau belum berupa nama resmi di pedoman. Pilih KOTA_BARU dari daftar.",
     "Catatan lain": "Catatan lain yang perlu dibaca. Lihat kolom CATATAN PEMERIKSAAN.",
     GRUP_OTO: "Kota di baris-baris ini sudah diganti otomatis dengan dua bukti yang saling menguatkan (mis. kecamatan di alamat dan data master). "
-              "Tidak perlu diperiksa; kolom PERUBAHAN OTOMATIS menjelaskan apa yang diubah. Bila ada yang keliru, ubah KOTA_BARU.",
+              "Tidak perlu diperiksa; kolom CATATAN PERUBAHAN menjelaskan alasannya. Bila ada yang keliru, ubah KOTA_BARU.",
+    "CUST_ID kembar di file (isi berbeda)": "CUST_ID (dan distributor) yang sama muncul lebih dari sekali di file dengan isi kolom yang berbeda "
+                                            "(baris dan kolom yang beda disebut di catatan). Baris yang persis sama sudah digabung otomatis. "
+                                            "Tentukan mana yang benar; baris yang tidak dipakai bisa diputuskan HAPUS di Tahap 2.",
     GRUP_BERSIH: "Tidak ada catatan. Tidak perlu diperiksa.",
 }
 
@@ -2995,13 +3218,14 @@ def tampil_cleansing(st):
     st.divider()
     st.subheader("Tahap 1: Hasil Cleansing")
     st.write(f"File: **{ss['nama_file']}** ({len(cl):,} baris)")
-    nk_, nh_ = ss.get("info_bersih", (0, 0))
-    if nk_ or nh_:
-        st.info(f"Dibersihkan otomatis sebelum cleansing: {nh_:,} baris header ganda dan {nk_:,} baris kosong dibuang.")
+    nk_, nh_, nd_ = (tuple(ss.get("info_bersih", (0, 0, 0))) + (0, 0, 0))[:3]
+    if nk_ or nh_ or nd_:
+        st.info(f"Dibersihkan otomatis sebelum cleansing: {nh_:,} baris header ganda dan {nk_:,} baris kosong dibuang; "
+                f"{nd_:,} baris yang persis sama (termasuk CUST_ID) digabung jadi satu.")
     if not pedoman:
         st.warning("Pedoman ID belum diunggah (buka Update Data Baru > Data pendukung > Pedoman penamaan ID). Kota dan segmen tidak dapat divalidasi.")
     t_full = tabel_cleansing(cl, kol, pedoman)
-    grup_full = pd.Series([grup_cleansing(c, o) for c, o in zip(t_full["CATATAN_CEK"], t_full["PERUBAHAN_OTOMATIS"])],
+    grup_full = pd.Series([grup_cleansing(c, o) for c, o in zip(t_full["CATATAN_CEK"], t_full["CATATAN_PERUBAHAN"])],
                           index=t_full.index, dtype=object)
     n_cek = int((t_full["CATATAN_CEK"] != "").sum())
     st.write(f"Baris yang perlu diperiksa: **{n_cek:,}** dari {len(t_full):,}")
@@ -3044,8 +3268,8 @@ def tampil_cleansing(st):
             "NO.": kolom_no(st),
             "PRIORITAS": st.column_config.TextColumn("PRIORITAS", help="Urutan yang perlu dibenarkan lebih dulu: Utama > Penting > Cek."),
             "CATATAN_CEK": st.column_config.TextColumn("CATATAN PEMERIKSAAN"),
-            "PERUBAHAN_OTOMATIS": st.column_config.TextColumn(
-                "PERUBAHAN OTOMATIS", help="Kota yang sudah diubah otomatis dengan bukti kuat. Informasi saja, tidak perlu diperiksa."),
+            "CATATAN_PERUBAHAN": st.column_config.TextColumn(
+                "CATATAN PERUBAHAN", help="Alasan kota diubah otomatis (bukti kuat). Informasi saja, tidak perlu diperiksa."),
             "PNAMLANG_AKHIR": st.column_config.TextColumn("PNAMLANG_AKHIR (edit)"),
             "KOTA_BARU": col_kota,
             "SEGMENT_BARU": col_segment(st, opsi_segment(t0["SEGMENT_BARU"].dropna())),
@@ -3061,6 +3285,11 @@ def tampil_cleansing(st):
             level = LEVEL_GRUP.get(label, 1)
             with st.expander(f"{ikon_grup(label)} {label} ({len(sub):,})", expanded=level >= 1):
                 st.caption(PETUNJUK_GRUP.get(label, ""))
+                # kolom catatan hanya yang relevan per kelompok: CATATAN PERUBAHAN hanya di kelompok kota diubah otomatis (bukti kuat)
+                buang_kol = ["CATATAN_PERUBAHAN"] if label != GRUP_OTO else ["CATATAN_CEK"]
+                if label == GRUP_BERSIH:
+                    buang_kol = ["CATATAN_PERUBAHAN", "CATATAN_CEK"]
+                sub = sub.drop(columns=[c for c in buang_kol if c in sub.columns])
                 # peringatan nama kotor khusus untuk kelompok ini (bukan satu peringatan global)
                 n_kg, rinci_g = ringkas_nama_kotor(sub["PNAMLANG_AKHIR"])
                 if n_kg and label != GRUP_BERSIH:
@@ -3153,6 +3382,8 @@ def page_update(st):
     """Menu 1: beranda + alur Update Data Baru (unggah -> Tahap 1 -> Tahap 2 -> simpan)."""
     tampil_beranda(st)
     st.divider()
+    if st.session_state.get("draft_info"):
+        st.info(st.session_state["draft_info"])
     if not db_ready():
         st.warning("Master belum ada di database. Buka 'Data pendukung > Master awal' di halaman ini terlebih dahulu.")
         return
@@ -3196,9 +3427,11 @@ def page_update(st):
             try:
                 with st.spinner("Memproses cleansing..."):
                     ss = st.session_state
+                    ss.pop("draft_info", None)
+                    ss.pop("draft_dihapus", None)
                     c = cache_db(st)
                     murni = siapkan_murni(sh_baru, sheet_baru)
-                    ss["info_bersih"] = murni.attrs.get("info_bersih", (0, 0))
+                    ss["info_bersih"] = murni.attrs.get("info_bersih", (0, 0, 0))
                     kb = (cust_cfg or {}).get("kol_baru") or {}
                     cl = clean_dataframe_baru(murni, c["pedoman"], c["kec"], kb.get("alamat"), c.get("riw"), c.get("cust_kota"))
                     kol_cl = {k: (kb.get(k) or deteksi_kolom(cl, k)) for k in ("alamat", "distributor", "cust_id", "channel")}
@@ -3225,6 +3458,7 @@ def page_update(st):
             tampil_hasil_update(st)
         elif tahap == 1:
             tampil_cleansing(st)
+        draft_catat(st)
 
     _fragment(st, _isi)
 
@@ -3760,6 +3994,18 @@ def ui_tab_cust(st, res, rv, opsi_kota):
         t0 = t_full[(t_full["KEPUTUSAN"] == LABEL_CUST_BELUM) | t_full["DETAIL"]] if hanya else t_full
         st.markdown(f"#### {judul} ({len(t0)})")
         st.caption(ket)
+        if jenis == "TAIL" and not saved:
+            tail_df = cmatch[cmatch["JENIS_MATCH"] == "TAIL"]
+            belum_t = tail_df[tail_df["AKSI"].isna()]["BARIS_EXCEL"].tolist()
+            gab_t = tail_df[tail_df["AKSI"] == "GABUNG_LAMA"]["BARIS_EXCEL"].tolist()
+            g1, g2, _ = st.columns([1.3, 1.3, 3])
+            if g1.button(f"Gabung row semua ({len(belum_t)})", key="gab_tail_semua", disabled=not belum_t,
+                         help="Semua baris di bagian ini yang belum diputuskan dijadikan GABUNG ROW (outlet sama, nama master dipertahankan). "
+                              "Periksa dulu perbandingannya."):
+                terapkan_selisih_cust(st, rv, res, {b: {"KEPUTUSAN": LABEL_AKSI["GABUNG_LAMA"]} for b in belum_t})
+            if g2.button(f"Batalkan gabung semua ({len(gab_t)})", key="batal_gab_tail", disabled=not gab_t,
+                         help="Mengembalikan baris berstatus GABUNG ROW di bagian ini menjadi belum diputuskan."):
+                terapkan_selisih_cust(st, rv, res, {b: {"KEPUTUSAN": LABEL_CUST_BELUM} for b in gab_t})
         if len(t0) == 0:
             st.info("Tidak ada baris.")
             continue
@@ -4030,15 +4276,21 @@ def load_koreksi_kota(limit=3000):
     return d
 
 
-def page_riwayat(st):
-    """Menu 2: semua riwayat dan unduhan, dipecah per jenis. Hanya bagian yang dipilih yang dijalankan (lebih cepat)."""
+BAGIAN_RIWAYAT = ["Riwayat penyimpanan", "Riwayat perubahan per outlet", "Riwayat ganti ID", "Riwayat koreksi kota",
+                  "Unduh master", "Unduh outlet ber-ID baru"]
+
+
+def page_riwayat(st, bagian=None):
+    """Menu 3: semua riwayat dan unduhan, dipecah per jenis. Bagian dipilih dari sidebar (di bawah menu 'Riwayat & Unduh');
+    hanya bagian yang dipilih yang dijalankan (lebih cepat)."""
     st.subheader("Riwayat & Unduh")
     if not db_ready():
         st.info("Belum ada data.")
         return
-    bagian = st.radio("Pilih bagian", [
-        "Riwayat penyimpanan", "Riwayat perubahan per outlet", "Riwayat ganti ID", "Riwayat koreksi kota",
-        "Unduh master", "Unduh outlet ber-ID baru"], horizontal=True, key="riwayat_bagian")
+    if bagian is None:   # cadangan bila dipanggil tanpa sidebar
+        bagian = st.radio("Pilih bagian", BAGIAN_RIWAYAT, horizontal=True, key="riwayat_bagian_alt")
+    else:
+        st.markdown(f"##### {bagian}")
 
     if bagian == "Riwayat penyimpanan":
         st.caption("Setiap data disimpan ke master, satu baris tercatat di sini (kapan, file apa, ringkasannya).")
@@ -4209,6 +4461,176 @@ def page_riwayat_id(st):
             st.download_button("Unduh (CSV)", sal.to_csv(index=False).encode("utf-8-sig"), "id_tidak_sesuai.csv", "text/csv")
 
 
+# ------------------------------------------------------------------------------
+# KOREKSI DATA MASTER (mengubah data yang SUDAH tersimpan di Neon)
+# Unit edit = outlet (semua baris master ber-ID_STR_OUTLET sama): nama, kota, segmen, dan (opsional) ID mengikuti kota/segmen.
+# ------------------------------------------------------------------------------
+def tabel_outlet_master(m):
+    """Satu baris per ID_STR_OUTLET (untuk dicari & diedit), lengkap dengan jumlah row dan CUST_ID."""
+    kc, ka, kd = deteksi_kolom(m, "cust_id"), deteksi_kolom(m, "alamat"), deteksi_kolom(m, "distributor")
+    g = m.groupby("ID_STR_OUTLET", sort=False)
+    agg = {"PNAMLANG_AKHIR": ("PNAMLANG_AKHIR", "first"), "KOTA_BARU": ("KOTA_BARU", "first"),
+           "SEGMENT_BARU": ("SEGMENT_BARU", "first"), "JML_ROW": ("PNAMLANG_AKHIR", "size")}
+    if ka:
+        agg["ALAMAT"] = (ka, "first")
+    d = g.agg(**agg).reset_index()
+    for kol, nama in ((kc, "CUST_ID"), (kd, "DISTRIBUTOR")):
+        if kol:
+            peta = g[kol].agg(lambda s: ", ".join(pd.unique(s.dropna().astype(str))[:5]))
+            d[nama] = d["ID_STR_OUTLET"].map(peta)
+    return d
+
+
+def simpan_koreksi_master(perubahan, pedoman=None, ganti_id=False):
+    """Terapkan koreksi ke master di Neon dalam satu transaksi. perubahan = list dict {id, nama, kota, segmen, lama: (nama, kota, segmen)}.
+    Semua baris ber-ID_STR_OUTLET sama ikut diubah. Bila ganti_id, ID mengikuti kode segmen/kota baru dengan nomor urut berikutnya.
+    Dicatat di riwayat_batch (jenis KOREKSI), log_perubahan, dan riwayat_id. Kembalikan (id batch, daftar (id_lama, id_baru))."""
+    waktu = pd.Timestamp(now_wib())
+    ensure_meta_tables()
+    ganti, seq = [], {}
+    with engine().begin() as conn:
+        conn.execute(text(f"ALTER TABLE {TABLE_MASTER} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ"))
+        conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": LOCK_KEY})
+        kol_tbl = {c["name"] for c in inspect(conn).get_columns(TABLE_MASTER)}
+        log = []
+        for p in perubahan:
+            id_lama, id_baru = p["id"], p["id"]
+            if ganti_id and pedoman:
+                pref = prefix_id(p["kota"], p["segmen"], pedoman)
+                if pref and pref != prefix_dari_id(id_lama):
+                    if pref not in seq:
+                        ids = [r[0] for r in conn.execute(
+                            text(f'SELECT DISTINCT "ID_STR_OUTLET" FROM {TABLE_MASTER} WHERE "ID_STR_OUTLET" LIKE :p'), {"p": pref + ".%"})]
+                        seq[pref] = max([int(i.rsplit(".", 1)[1]) for i in ids if i.rsplit(".", 1)[1].isdigit()] or [0])
+                    seq[pref] += 1
+                    id_baru = f"{pref}.{seq[pref]}"
+            set_sql = '"PNAMLANG_AKHIR" = :n, "KOTA_BARU" = :k, "ID_STR_OUTLET" = :i, updated_at = :w'
+            par = {"n": p["nama"], "k": p["kota"], "i": id_baru, "w": waktu, "lama": id_lama}
+            if "SEGMENT_BARU" in kol_tbl:
+                set_sql += ', "SEGMENT_BARU" = :s'
+                par["s"] = p["segmen"]
+            r = conn.execute(text(f'UPDATE {TABLE_MASTER} SET {set_sql} WHERE "ID_STR_OUTLET" = :lama'), par)
+            if r.rowcount == 0:
+                raise ValueError(f"Outlet {id_lama} tidak ditemukan di master (mungkin sudah berubah). Muat ulang halaman.")
+            p["jml_row"], p["id_baru"] = r.rowcount, id_baru
+            nl, kl, sl = p["lama"]
+            log.append({"jenis": "KOREKSI MASTER", "id_str_outlet": id_baru,
+                        "detail": (f"[Koreksi Data Master] '{nl}' / {kl} / {sl} -> '{p['nama']}' / {p['kota']} / {p['segmen']}"
+                                   + (f"; ID {id_lama} -> {id_baru}" if id_baru != id_lama else "") + f"; {r.rowcount} baris master")})
+            if id_baru != id_lama:
+                ganti.append((id_lama, id_baru))
+        bid = conn.execute(text("INSERT INTO riwayat_batch (batch_week, nama_file, hash_file, ringkasan, jenis) "
+                                "VALUES (:b, :n, :h, :r, 'KOREKSI') RETURNING id"),
+                           {"b": minggu_default(), "n": "KOREKSI MANUAL", "h": uuid.uuid4().hex,
+                            "r": f"{len(perubahan)} outlet dikoreksi; ID berganti: {len(ganti)}"}).scalar()
+        conn.execute(text("INSERT INTO log_perubahan (batch_id, jenis, id_str_outlet, detail) VALUES (:b, :j, :i, :d)"),
+                     [{"b": bid, "j": x["jenis"], "i": x["id_str_outlet"], "d": x["detail"]} for x in log])
+        idc = [p for p in perubahan if p["id_baru"] != p["id"]]
+        if idc:
+            conn.execute(text(
+                "INSERT INTO riwayat_id (batch_id, id_lama, id_baru, pnamlang_lama, pnamlang_baru, kota_lama, kota_baru, "
+                "segmen_lama, segmen_baru, sebab, jml_row, cust_id, nama_file) VALUES (:b, :il, :ib, :nl, :nb, :kl, :kb, :sl, :sb, "
+                ":sebab, :jr, '', 'KOREKSI MANUAL')"),
+                [{"b": bid, "il": p["id"], "ib": p["id_baru"], "nl": p["lama"][0], "nb": p["nama"], "kl": p["lama"][1], "kb": p["kota"],
+                  "sl": p["lama"][2], "sb": p["segmen"], "sebab": "koreksi manual", "jr": int(p["jml_row"])} for p in idc])
+    _st.cache_data.clear()
+    return bid, ganti
+
+
+def page_koreksi(st):
+    """Menu 2: ubah nama/kota/segmen (dan ID) outlet yang SUDAH tersimpan di master, sesudah salah simpan atau ada perbaikan."""
+    ss = st.session_state
+    st.subheader("Koreksi Data Master")
+    st.caption("Untuk memperbaiki data yang sudah terlanjur tersimpan di Neon. Cari outlet dengan filter, ubah PNAMLANG_AKHIR / KOTA_BARU / "
+               "SEGMENT_BARU di tabel, lalu simpan. Perubahan berlaku ke semua baris master ber-ID_STR_OUTLET sama dan tercatat di riwayat.")
+    if ss.get("kor_ok"):
+        st.success(ss.pop("kor_ok"))
+    if not db_ready():
+        st.info("Master belum ada di database.")
+        return
+    m = master_cached(st)
+    ver = ss["master_cache"][0]
+    kc = ss.get("kor_cache")
+    if not kc or kc[0] != ver:
+        with st.spinner("Menyusun daftar outlet..."):
+            ss["kor_cache"] = (ver, tabel_outlet_master(m))
+    outlet = ss["kor_cache"][1]
+    pedoman = load_pedoman()
+    hasil = filter_excel(st, outlet, "kor")
+    BATAS = 300
+    st.write(f"Hasil filter: **{len(hasil):,}** outlet dari {len(outlet):,}")
+    if len(hasil) == 0:
+        st.info("Tidak ada outlet. Tambahkan kondisi filter (mis. ID_STR_OUTLET, PNAMLANG_AKHIR mengandung ..., CUST_ID).")
+        return
+    if len(hasil) > BATAS:
+        st.info(f"Tabel edit menampilkan {BATAS} outlet pertama. Persempit filter untuk outlet lainnya, dan simpan dulu sebelum mengganti filter.")
+    t0 = hasil.head(BATAS).copy()
+    for c in ("KOTA_BARU", "SEGMENT_BARU"):
+        t0[c] = t0[c].map(lambda v: v if _t(v) else None).astype(object)
+    t0 = t0.set_index("ID_STR_OUTLET", drop=False)
+    opsi_k = opsi_kota_ped(pedoman, t0["KOTA_BARU"].dropna())
+    cfg = {
+        "PNAMLANG_AKHIR": st.column_config.TextColumn("PNAMLANG_AKHIR (edit)"),
+        "KOTA_BARU": (st.column_config.SelectboxColumn("KOTA_BARU (pilih)", options=opsi_k) if opsi_k
+                      else st.column_config.TextColumn("KOTA_BARU (edit)")),
+        "SEGMENT_BARU": col_segment(st, opsi_segment(t0["SEGMENT_BARU"].dropna())),
+        "JML_ROW": st.column_config.NumberColumn("JML_ROW", format="%d"),
+    }
+    edit = ["PNAMLANG_AKHIR", "KOTA_BARU", "SEGMENT_BARU"]
+    kunci = int(pd.util.hash_pandas_object(t0["ID_STR_OUTLET"], index=False).sum())
+    ed = st.data_editor(t0, key=f"kor_ed_{ver}_{kunci}", hide_index=True, width="stretch", column_config=cfg,
+                        disabled=[c for c in t0.columns if c not in edit])
+    perubahan, masalah = [], []
+    for id_ in ed.index:
+        a, b = t0.loc[id_], ed.loc[id_]
+        lama = (_t(a["PNAMLANG_AKHIR"]).strip(), _s(a["KOTA_BARU"]), _s(a["SEGMENT_BARU"]))
+        baru = (_t(b["PNAMLANG_AKHIR"]).strip(), _s(b["KOTA_BARU"]), _s(b["SEGMENT_BARU"]))
+        if lama == baru:
+            continue
+        if not baru[0]:
+            masalah.append(f"{id_}: nama tidak boleh kosong.")
+            continue
+        perubahan.append({"id": id_, "nama": baru[0], "kota": baru[1] or None, "segmen": baru[2] or None,
+                          "lama": (_t(a["PNAMLANG_AKHIR"]), _t(a["KOTA_BARU"]), _t(a["SEGMENT_BARU"]))})
+    for x in masalah:
+        st.error(x)
+    if not perubahan:
+        st.caption("Belum ada perubahan.")
+        return
+    ganti_id = st.checkbox("ID_STR_OUTLET ikut diganti bila kota/segmen berubah (kode ID mengikuti kota + segmen baru, nomor urut berikutnya)",
+                           value=False, key="kor_ganti_id", disabled=not pedoman,
+                           help="Mati (bawaan): hanya nama/kota/segmen yang diubah, ID tetap. Aktif: ID dibuat ulang mengikuti kode pedoman "
+                                "dan riwayat ID dicatat. Perlu pedoman ID.")
+    prev = pd.DataFrame([{
+        "ID_STR_OUTLET": p["id"], "NAMA_LAMA": p["lama"][0], "NAMA_BARU": p["nama"], "KOTA_LAMA": p["lama"][1], "KOTA_BARU": _t(p["kota"]),
+        "SEGMEN_LAMA": p["lama"][2], "SEGMEN_BARU": _t(p["segmen"]),
+        "KODE_ID_BARU": (prefix_id(p["kota"], p["segmen"], pedoman) or "tidak ditemukan di pedoman") if (ganti_id and pedoman) else "",
+    } for p in perubahan])
+    st.write(f"**{len(perubahan)} outlet akan diubah:**")
+    st.dataframe(prev, hide_index=True, width="stretch")
+    if pedoman:
+        tak_dikenal = [p["id"] for p in perubahan if (p["kota"] and _norm_kab(p["kota"]) not in pedoman["wil"])
+                       or (p["segmen"] and _s(p["segmen"]) not in pedoman["seg"])]
+        if tak_dikenal:
+            st.warning(f"{len(tak_dikenal)} outlet memakai kota/segmen yang tidak ada di pedoman (ID tidak bisa mengikuti): "
+                       + ", ".join(tak_dikenal[:5]) + (" ..." if len(tak_dikenal) > 5 else ""))
+    ok = st.checkbox("Saya sudah memeriksa perubahan di atas dan siap menyimpannya ke master", key="kor_ok_cek")
+    if st.button("Simpan koreksi ke master", type="primary", disabled=not ok or bool(masalah)):
+        try:
+            with st.spinner("Menyimpan..."):
+                bid, ganti = simpan_koreksi_master(perubahan, pedoman, ganti_id)
+        except Exception as e:
+            st.error(f"Gagal menyimpan: {e}")
+            return
+        ss.pop("kor_cache", None)
+        ss.pop("kor_ok_cek", None)
+        ss["kor_ok"] = (f"Koreksi tersimpan (riwayat #{bid}): {len(perubahan)} outlet diubah"
+                        + (f", {len(ganti)} ID berganti (lihat Riwayat & Unduh > Riwayat ganti ID)" if ganti else "") + ".")
+        if ss.get("tahap") and not ss.get("saved"):
+            ss["kor_ok"] += " Master berubah: bila ada pekerjaan Update Data Baru yang belum disimpan, jalankan ulang cleansing sebelum menyimpan."
+        st.rerun()
+
+
 def main():
     import streamlit as st
 
@@ -4224,9 +4646,20 @@ def main():
         st.stop()
     # Hanya 2 menu utama. Pedoman, wilayah, dan master awal ada di "Update Data Baru > Data pendukung";
     # riwayat ganti ID dan riwayat lainnya ada di "Riwayat & Unduh".
-    menu = st.sidebar.radio("Menu", ["Update Data Baru", "Riwayat & Unduh"])
+    sesi_awal(st)
+    menu = st.sidebar.radio("Menu", ["Update Data Baru", "Koreksi Data Master", "Riwayat & Unduh"], key="menu_utama")
+    bagian = None
+    if menu == "Riwayat & Unduh":   # rincian menu ada tepat di bawah menu utama
+        bagian = st.sidebar.radio("Rincian Riwayat & Unduh", BAGIAN_RIWAYAT, key="riwayat_bagian",
+                                  format_func=lambda b: "   ↳ " + b)
     st.sidebar.caption("Database: Neon PostgreSQL")
-    {"Update Data Baru": page_update, "Riwayat & Unduh": page_riwayat}[menu](st)
+    sidebar_draft(st)
+    if menu == "Update Data Baru":
+        page_update(st)
+    elif menu == "Koreksi Data Master":
+        page_koreksi(st)
+    else:
+        page_riwayat(st, bagian)
 
 
 if __name__ == "__main__":
